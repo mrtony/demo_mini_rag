@@ -1,8 +1,10 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import field_validator
+from pydantic import SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from .prompt_builder import DEFAULT_CHAT_SYSTEM_PROMPT
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -22,9 +24,10 @@ class Settings(BaseSettings):
     app_name: str = "Minimal ChatGPT Clone"
     api_prefix: str = "/api"
     database_url: str = f"sqlite+aiosqlite:///{DEFAULT_DB_PATH.as_posix()}"
-    openai_api_key: str = ""
-    openai_chat_model: str = "gpt-5.4-mini"
-    openai_title_model: str = "gpt-5.4-nano"
+    openai_api_key: SecretStr = SecretStr("")
+    chat_model: str = "gpt-5.4-mini"
+    title_model: str = "gpt-5.4-nano"
+    chat_system_prompt: str = DEFAULT_CHAT_SYSTEM_PROMPT
     frontend_origin: str = "http://127.0.0.1:5173"
     title_max_length: int = 20
     log_level: str = "INFO"

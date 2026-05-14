@@ -13,11 +13,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from .chat_events import ChatStreamState
 from .config import Settings, get_settings
 from .db import SessionLocal, get_db_session
 from .models import Conversation, Message
 from .schemas import ChatStreamRequest, ConversationDetail, ConversationSummary, StoredMessage
-from .services.openai_service import OpenAIService
+from .services.chat_service import ChatService
 from .sse import format_sse_event, iter_sse
 
 
@@ -26,8 +27,8 @@ ACTIVE_STREAMS: dict[str, asyncio.Event] = {}
 logger = logging.getLogger(__name__)
 
 
-def get_openai_service(settings: Settings = Depends(get_settings)) -> OpenAIService:
-    return OpenAIService(settings=settings)
+def get_chat_service(settings: Settings = Depends(get_settings)) -> ChatService:
+    return ChatService(settings=settings)
 
 
 def _utc_now() -> datetime:
@@ -44,23 +45,6 @@ def _temporary_title(message: str, limit: int) -> str:
     return message.strip().replace("\n", " ")[:limit] or "New chat"
 
 
-def _event_type(event: Any) -> str:
-    return event.get("type", "") if isinstance(event, dict) else getattr(event, "type", "")
-
-
-def _event_delta(event: Any) -> str:
-    if isinstance(event, dict):
-        return event.get("delta", "")
-    return getattr(event, "delta", "")
-
-
-def _event_response_id(event: Any) -> str | None:
-    response = event.get("response") if isinstance(event, dict) else getattr(event, "response", None)
-    if response is None:
-        return None
-    return response.get("id") if isinstance(response, dict) else getattr(response, "id", None)
-
-
 async def _load_conversation_or_404(session: AsyncSession, public_id: str) -> Conversation:
     result = await session.execute(
         select(Conversation)
@@ -73,19 +57,12 @@ async def _load_conversation_or_404(session: AsyncSession, public_id: str) -> Co
     return conversation
 
 
-async def _build_history(conversation_pk: int) -> list[dict[str, str]]:
+async def _load_conversation_messages(conversation_pk: int) -> list[Message]:
     async with SessionLocal() as session:
         result = await session.execute(
             select(Message).where(Message.conversation_fk == conversation_pk).order_by(Message.id.asc())
         )
-        messages = result.scalars().all()
-
-    history: list[dict[str, str]] = []
-    for message in messages:
-        history.append({"role": "user", "content": message.query})
-        if message.response:
-            history.append({"role": "assistant", "content": message.response})
-    return history
+        return list(result.scalars().all())
 
 
 async def _create_message(
@@ -200,7 +177,7 @@ async def stop_conversation_stream(conversation_id: str):
 async def stream_chat(
     payload: ChatStreamRequest,
     request: Request,
-    openai_service: OpenAIService = Depends(get_openai_service),
+    chat_service: ChatService = Depends(get_chat_service),
     settings: Settings = Depends(get_settings),
 ):
     normalized_conversation_id = _normalize_conversation_id(payload.conversation_id)
@@ -250,9 +227,9 @@ async def stream_chat(
                     "conversation_title": temp_title,
                 },
             )
-            title_task = asyncio.create_task(openai_service.generate_title(payload.message))
+            title_task = asyncio.create_task(chat_service.generate_title(payload.message))
 
-        history = await _build_history(conversation_pk)
+        messages = await _load_conversation_messages(conversation_pk)
 
         async def emit_title_if_ready(force: bool = False):
             nonlocal title_sent
@@ -275,7 +252,7 @@ async def stream_chat(
             )
 
         try:
-            stream = await openai_service.stream_chat(history, payload.message)
+            stream = chat_service.stream_chat(messages, payload.message)
 
             async for event in stream:
                 if stop_event.is_set():
@@ -305,39 +282,42 @@ async def stream_chat(
                 if title_event is not None:
                     yield title_event
 
-                event_type = _event_type(event)
-
-                if event_type == "response.created":
+                if event.state == ChatStreamState.STARTED:
                     message = await _create_message(
                         conversation_pk=conversation_pk,
                         user_query=payload.message,
-                        openai_response_id=_event_response_id(event),
+                        openai_response_id=event.response_id,
                     )
                     message_id = message.id
                     logger.info(
-                        "OpenAI response created for conversation %s with message %s",
+                        "Chat stream started for conversation %s with message %s",
                         public_conversation_id,
                         message.id,
                     )
                     yield format_sse_event("message.created", {"message_id": message.id})
                     continue
 
-                if event_type == "response.output_text.delta":
+                if event.state == ChatStreamState.DELTA:
                     if message_id is None:
                         message = await _create_message(
                             conversation_pk=conversation_pk,
                             user_query=payload.message,
-                            openai_response_id=_event_response_id(event),
+                            openai_response_id=event.response_id,
                         )
                         message_id = message.id
                         yield format_sse_event("message.created", {"message_id": message.id})
-                    delta = _event_delta(event)
+                    delta = event.delta
                     response_buffer += delta
                     await _update_message_response(message_id, response_buffer)
                     yield format_sse_event("message.delta", {"delta": delta})
+                    logger.info(
+                        "Chat stream delta for conversation %s now %s chars",
+                        public_conversation_id,
+                        len(response_buffer),
+                    )
                     continue
 
-                if event_type in {"response.completed", "response.incomplete"}:
+                if event.state == ChatStreamState.COMPLETED:
                     if message_id is not None:
                         await _update_message_response(message_id, response_buffer, "completed")
                         terminal_status = "completed"
@@ -359,8 +339,8 @@ async def stream_chat(
                     )
                     return
 
-                if event_type in {"error", "response.failed"}:
-                    message_text = str(getattr(event, "error", None) or "Streaming error")
+                if event.state == ChatStreamState.ERROR:
+                    message_text = event.error_message or "Streaming error"
                     if message_id is not None:
                         await _mark_message_error(message_id, response_buffer, "error")
                         terminal_status = "error"
@@ -369,7 +349,13 @@ async def stream_chat(
                         public_conversation_id,
                         message_text,
                     )
-                    yield format_sse_event("error", {"message": message_text, "code": "stream_failed"})
+                    yield format_sse_event(
+                        "error",
+                        {
+                            "message": message_text,
+                            "code": event.error_code or "stream_failed",
+                        },
+                    )
                     return
 
             if message_id is not None:
@@ -414,7 +400,7 @@ async def stream_chat(
                 with suppress(asyncio.CancelledError):
                     await title_task
             if stream is not None:
-                await _run_cleanup(openai_service.maybe_close_stream(stream))
+                await _run_cleanup(chat_service.maybe_close_stream(stream))
             if ACTIVE_STREAMS.get(public_conversation_id) is stop_event:
                 ACTIVE_STREAMS.pop(public_conversation_id, None)
 

@@ -180,8 +180,9 @@ Create `.env` from `.env.example` and set at least `OPENAI_API_KEY`.
 Available backend settings:
 
 - `OPENAI_API_KEY`: OpenAI API key
-- `OPENAI_CHAT_MODEL`: chat model for streaming responses
-- `OPENAI_TITLE_MODEL`: model used to generate conversation titles
+- `CHAT_MODEL`: chat model for streaming responses
+- `TITLE_MODEL`: model used to generate conversation titles
+- `CHAT_SYSTEM_PROMPT`: optional full override for the default chat system prompt
 - `FRONTEND_ORIGIN`: allowed frontend origin for CORS
 - `LOG_LEVEL`: backend log level such as `INFO` or `DEBUG`
 - `LOG_FILE`: backend log file path

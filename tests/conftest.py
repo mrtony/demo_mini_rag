@@ -9,59 +9,31 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from backend.app.chat_events import ChatEvent, ChatStreamState
 from backend.app.db import Base
 from backend.app.main import app
-from backend.app.routes import get_openai_service
+from backend.app.routes import get_chat_service
 
 
-class FakeEvent:
-    def __init__(self, event_type: str, delta: str = "", response_id: str | None = None) -> None:
-        self.type = event_type
-        self.delta = delta
-        self.response = type("ResponseRef", (), {"id": response_id})() if response_id else None
-
-
-class FakeStream:
-    def __init__(self, events: list[FakeEvent]) -> None:
-        self.events = events
-        self.closed = False
-
-    def __aiter__(self):
-        self._index = 0
-        return self
-
-    async def __anext__(self):
-        if self._index >= len(self.events):
-            raise StopAsyncIteration
-        await asyncio.sleep(0)
-        item = self.events[self._index]
-        self._index += 1
-        return item
-
-    async def close(self) -> None:
-        self.closed = True
-
-
-class FakeOpenAIService:
+class FakeChatService:
     def __init__(self) -> None:
-        self.stream = FakeStream(
-            [
-                FakeEvent("response.created", response_id="resp_test_1"),
-                FakeEvent("response.output_text.delta", delta="Hello"),
-                FakeEvent("response.output_text.delta", delta=" world"),
-                FakeEvent("response.completed"),
-            ]
-        )
+        self.closed = False
         self.title = "Test title"
 
-    async def stream_chat(self, history, user_message):
-        return self.stream
+    async def stream_chat(self, messages, user_message):
+        yield ChatEvent(state=ChatStreamState.STARTED, response_id="resp_test_1")
+        await asyncio.sleep(0)
+        yield ChatEvent(state=ChatStreamState.DELTA, delta="Hello", response_id="resp_test_1")
+        await asyncio.sleep(0)
+        yield ChatEvent(state=ChatStreamState.DELTA, delta=" world", response_id="resp_test_1")
+        await asyncio.sleep(0)
+        yield ChatEvent(state=ChatStreamState.COMPLETED)
 
     async def generate_title(self, first_message: str) -> str:
         return self.title
 
     async def maybe_close_stream(self, stream) -> None:
-        await stream.close()
+        self.closed = True
 
 
 @pytest_asyncio.fixture()
@@ -80,7 +52,7 @@ async def test_client(tmp_path) -> AsyncIterator[AsyncClient]:
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
 
-    app.dependency_overrides[get_openai_service] = FakeOpenAIService
+    app.dependency_overrides[get_chat_service] = FakeChatService
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
