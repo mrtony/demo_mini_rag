@@ -32,6 +32,11 @@ export async function listWorkspaces(): Promise<WorkspaceSummary[]> {
   return expectJson<WorkspaceSummary[]>(response);
 }
 
+export async function listArchivedWorkspaces(): Promise<WorkspaceSummary[]> {
+  const response = await fetch(`${API_BASE}/api/workspaces/archived`);
+  return expectJson<WorkspaceSummary[]>(response);
+}
+
 export async function createWorkspace(name: string): Promise<WorkspaceSummary> {
   const response = await fetch(`${API_BASE}/api/workspaces`, {
     method: "POST",
@@ -58,6 +63,31 @@ export async function updateWorkspace(
       "Content-Type": "application/json",
     },
     body: JSON.stringify(payload),
+  });
+  return expectJson<WorkspaceSummary>(response);
+}
+
+export async function reorderWorkspaces(workspaceIds: string[]): Promise<WorkspaceSummary[]> {
+  const response = await fetch(`${API_BASE}/api/workspaces/reorder`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ workspace_ids: workspaceIds }),
+  });
+  return expectJson<WorkspaceSummary[]>(response);
+}
+
+export async function archiveWorkspace(workspaceId: string): Promise<WorkspaceSummary> {
+  const response = await fetch(`${API_BASE}/api/workspaces/${workspaceId}/archive`, {
+    method: "POST",
+  });
+  return expectJson<WorkspaceSummary>(response);
+}
+
+export async function restoreWorkspace(workspaceId: string): Promise<WorkspaceSummary> {
+  const response = await fetch(`${API_BASE}/api/workspaces/${workspaceId}/restore`, {
+    method: "POST",
   });
   return expectJson<WorkspaceSummary>(response);
 }

@@ -60,12 +60,17 @@ class WorkspaceUpdateRequest(BaseModel):
         return normalized
 
 
+class WorkspaceReorderRequest(BaseModel):
+    workspace_ids: list[str] = Field(min_length=1)
+
+
 class WorkspaceSummary(BaseModel):
     workspace_id: str
     name: str
     system_message: str
     selected_model: ModelCatalogSummary
     model_settings: dict[str, Any]
+    sort_order: int
     created_at: datetime
     updated_at: datetime
 

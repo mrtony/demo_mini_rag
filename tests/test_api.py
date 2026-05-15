@@ -102,6 +102,94 @@ async def test_creates_workspace_with_default_settings_and_rejects_invalid_names
 
 
 @pytest.mark.asyncio
+async def test_archives_and_restores_workspaces_between_active_and_archived_lists(test_client):
+    workspace_alpha = await create_workspace(test_client, "Workspace Alpha")
+    workspace_beta = await create_workspace(test_client, "Workspace Beta")
+
+    archive_response = await test_client.post(f"/api/workspaces/{workspace_alpha['workspace_id']}/archive")
+
+    assert archive_response.status_code == 200
+    archived_workspace = archive_response.json()
+    assert archived_workspace["workspace_id"] == workspace_alpha["workspace_id"]
+    assert archived_workspace["name"] == "Workspace Alpha"
+
+    active_list_response = await test_client.get("/api/workspaces")
+    archived_list_response = await test_client.get("/api/workspaces/archived")
+    archived_conversations_response = await test_client.get(
+        f"/api/workspaces/{workspace_alpha['workspace_id']}/conversations"
+    )
+
+    assert active_list_response.status_code == 200
+    assert [item["workspace_id"] for item in active_list_response.json()] == [workspace_beta["workspace_id"]]
+    assert archived_list_response.status_code == 200
+    assert [item["workspace_id"] for item in archived_list_response.json()] == [workspace_alpha["workspace_id"]]
+    assert archived_conversations_response.status_code == 404
+
+    restore_response = await test_client.post(f"/api/workspaces/{workspace_alpha['workspace_id']}/restore")
+
+    assert restore_response.status_code == 200
+    restored_workspace = restore_response.json()
+    assert restored_workspace["workspace_id"] == workspace_alpha["workspace_id"]
+
+    restored_active_list_response = await test_client.get("/api/workspaces")
+    restored_archived_list_response = await test_client.get("/api/workspaces/archived")
+
+    assert restored_active_list_response.status_code == 200
+    assert [item["workspace_id"] for item in restored_active_list_response.json()] == [
+        workspace_alpha["workspace_id"],
+        workspace_beta["workspace_id"],
+    ]
+    assert restored_archived_list_response.status_code == 200
+    assert restored_archived_list_response.json() == []
+
+
+@pytest.mark.asyncio
+async def test_reorders_active_workspaces_and_persists_manual_order(test_client):
+    workspace_alpha = await create_workspace(test_client, "Workspace Alpha")
+    workspace_beta = await create_workspace(test_client, "Workspace Beta")
+    workspace_gamma = await create_workspace(test_client, "Workspace Gamma")
+
+    reorder_response = await test_client.post(
+        "/api/workspaces/reorder",
+        json={
+            "workspace_ids": [
+                workspace_gamma["workspace_id"],
+                workspace_alpha["workspace_id"],
+                workspace_beta["workspace_id"],
+            ]
+        },
+    )
+
+    assert reorder_response.status_code == 200
+    assert [item["workspace_id"] for item in reorder_response.json()] == [
+        workspace_gamma["workspace_id"],
+        workspace_alpha["workspace_id"],
+        workspace_beta["workspace_id"],
+    ]
+
+    active_list_response = await test_client.get("/api/workspaces")
+
+    assert active_list_response.status_code == 200
+    assert [item["workspace_id"] for item in active_list_response.json()] == [
+        workspace_gamma["workspace_id"],
+        workspace_alpha["workspace_id"],
+        workspace_beta["workspace_id"],
+    ]
+
+    async with db_module.SessionLocal() as session:
+        result = await session.execute(
+            select(Workspace.workspace_id, Workspace.sort_order).order_by(Workspace.sort_order.asc())
+        )
+        stored_order = result.all()
+
+    assert stored_order == [
+        (workspace_gamma["workspace_id"], 0),
+        (workspace_alpha["workspace_id"], 1),
+        (workspace_beta["workspace_id"], 2),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_updates_workspace_settings_with_model_validation_and_obsolete_cleanup(test_client):
     workspace = await create_workspace(test_client, "Workspace Alpha")
 

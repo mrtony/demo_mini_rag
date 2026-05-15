@@ -33,6 +33,7 @@ export type WorkspaceSummary = {
   system_message: string;
   selected_model: ModelCatalogSummary;
   model_settings?: Record<string, string | number>;
+  sort_order?: number;
   created_at: string;
   updated_at: string;
 };

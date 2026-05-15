@@ -3,26 +3,34 @@ import userEvent from "@testing-library/user-event";
 
 import App from "./App";
 import {
+  archiveWorkspace,
   createWorkspace,
   getDefaultWorkspaceModel,
   getConversation,
+  listArchivedWorkspaces,
   listModels,
   listWorkspaceConversations,
   listWorkspaces,
   openChatStream,
+  reorderWorkspaces,
+  restoreWorkspace,
   stopConversation,
   updateWorkspace,
 } from "./api";
 import { readSseStream } from "./lib/sse";
 
 vi.mock("./api", () => ({
+  archiveWorkspace: vi.fn(),
   createWorkspace: vi.fn(),
   getDefaultWorkspaceModel: vi.fn(),
   getConversation: vi.fn(),
+  listArchivedWorkspaces: vi.fn(),
   listModels: vi.fn(),
   listWorkspaceConversations: vi.fn(),
   listWorkspaces: vi.fn(),
   openChatStream: vi.fn(),
+  reorderWorkspaces: vi.fn(),
+  restoreWorkspace: vi.fn(),
   stopConversation: vi.fn(),
   updateWorkspace: vi.fn(),
   toChatBubbles: (messages: Array<{ id: number; query: string; response: string; status: string }>) =>
@@ -52,26 +60,35 @@ vi.mock("./lib/sse", () => ({
 const mockedCreateWorkspace = vi.mocked(createWorkspace);
 const mockedGetDefaultWorkspaceModel = vi.mocked(getDefaultWorkspaceModel);
 const mockedGetConversation = vi.mocked(getConversation);
+const mockedArchiveWorkspace = vi.mocked(archiveWorkspace);
+const mockedListArchivedWorkspaces = vi.mocked(listArchivedWorkspaces);
 const mockedListModels = vi.mocked(listModels);
 const mockedListWorkspaceConversations = vi.mocked(listWorkspaceConversations);
 const mockedListWorkspaces = vi.mocked(listWorkspaces);
 const mockedOpenChatStream = vi.mocked(openChatStream);
+const mockedReorderWorkspaces = vi.mocked(reorderWorkspaces);
+const mockedRestoreWorkspace = vi.mocked(restoreWorkspace);
 const mockedStopConversation = vi.mocked(stopConversation);
 const mockedUpdateWorkspace = vi.mocked(updateWorkspace);
 const mockedReadSseStream = vi.mocked(readSseStream);
 
 describe("App", () => {
   beforeEach(() => {
+    mockedArchiveWorkspace.mockReset();
     mockedCreateWorkspace.mockReset();
     mockedGetDefaultWorkspaceModel.mockReset();
     mockedGetConversation.mockReset();
+    mockedListArchivedWorkspaces.mockReset();
     mockedListModels.mockReset();
     mockedListWorkspaceConversations.mockReset();
     mockedListWorkspaces.mockReset();
     mockedOpenChatStream.mockReset();
+    mockedReorderWorkspaces.mockReset();
+    mockedRestoreWorkspace.mockReset();
     mockedStopConversation.mockReset();
     mockedUpdateWorkspace.mockReset();
     mockedReadSseStream.mockReset();
+    mockedListArchivedWorkspaces.mockResolvedValue([]);
     mockedStopConversation.mockResolvedValue(undefined);
     mockedListModels.mockResolvedValue([
       {
@@ -127,6 +144,226 @@ describe("App", () => {
         },
         sort_order: 1,
       },
+    ]);
+  });
+
+  it("moves archived workspaces into an archived view and restores them before reuse", async () => {
+    const user = userEvent.setup();
+
+    mockedListWorkspaces.mockResolvedValue([
+      {
+        workspace_id: "ws-alpha",
+        name: "Workspace Alpha",
+        system_message: "Alpha system",
+        selected_model: {
+          model_id: "gpt-5.4-nano",
+          label: "gpt-5.4-nano",
+          is_enabled: true,
+          is_default_workspace_model: true,
+        },
+        model_settings: {
+          temperature: 0.7,
+        },
+        created_at: "2026-05-15T00:00:00Z",
+        updated_at: "2026-05-15T00:00:00Z",
+      },
+      {
+        workspace_id: "ws-beta",
+        name: "Workspace Beta",
+        system_message: "Beta system",
+        selected_model: {
+          model_id: "gpt-5.4-nano",
+          label: "gpt-5.4-nano",
+          is_enabled: true,
+          is_default_workspace_model: true,
+        },
+        model_settings: {
+          temperature: 0.7,
+        },
+        created_at: "2026-05-15T00:01:00Z",
+        updated_at: "2026-05-15T00:01:00Z",
+      },
+    ]);
+    mockedListWorkspaceConversations.mockResolvedValue([]);
+    mockedArchiveWorkspace.mockResolvedValue({
+      workspace_id: "ws-alpha",
+      name: "Workspace Alpha",
+      system_message: "Alpha system",
+      selected_model: {
+        model_id: "gpt-5.4-nano",
+        label: "gpt-5.4-nano",
+        is_enabled: true,
+        is_default_workspace_model: true,
+      },
+      model_settings: {
+        temperature: 0.7,
+      },
+      created_at: "2026-05-15T00:00:00Z",
+      updated_at: "2026-05-15T00:05:00Z",
+    });
+    mockedRestoreWorkspace.mockResolvedValue({
+      workspace_id: "ws-alpha",
+      name: "Workspace Alpha",
+      system_message: "Alpha system",
+      selected_model: {
+        model_id: "gpt-5.4-nano",
+        label: "gpt-5.4-nano",
+        is_enabled: true,
+        is_default_workspace_model: true,
+      },
+      model_settings: {
+        temperature: 0.7,
+      },
+      created_at: "2026-05-15T00:00:00Z",
+      updated_at: "2026-05-15T00:06:00Z",
+    });
+
+    render(<App />);
+
+    expect(await screen.findByRole("button", { name: "Workspace Alpha gpt-5.4-nano" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Archive Workspace Alpha" }));
+
+    expect(mockedArchiveWorkspace).toHaveBeenCalledWith("ws-alpha");
+    expect(screen.queryByRole("button", { name: "Workspace Alpha gpt-5.4-nano" })).not.toBeInTheDocument();
+    expect(screen.getByText("Archived Workspaces")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Restore Workspace Alpha" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Restore Workspace Alpha" }));
+
+    expect(mockedRestoreWorkspace).toHaveBeenCalledWith("ws-alpha");
+    expect(await screen.findByRole("button", { name: "Workspace Alpha gpt-5.4-nano" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Restore Workspace Alpha" })).not.toBeInTheDocument();
+  });
+
+  it("persists manual workspace ordering after a move action", async () => {
+    const user = userEvent.setup();
+
+    mockedListWorkspaces.mockResolvedValue([
+      {
+        workspace_id: "ws-alpha",
+        name: "Workspace Alpha",
+        system_message: "Alpha system",
+        selected_model: {
+          model_id: "gpt-5.4-nano",
+          label: "gpt-5.4-nano",
+          is_enabled: true,
+          is_default_workspace_model: true,
+        },
+        model_settings: {
+          temperature: 0.7,
+        },
+        sort_order: 0,
+        created_at: "2026-05-15T00:00:00Z",
+        updated_at: "2026-05-15T00:00:00Z",
+      },
+      {
+        workspace_id: "ws-beta",
+        name: "Workspace Beta",
+        system_message: "Beta system",
+        selected_model: {
+          model_id: "gpt-5.4-nano",
+          label: "gpt-5.4-nano",
+          is_enabled: true,
+          is_default_workspace_model: true,
+        },
+        model_settings: {
+          temperature: 0.7,
+        },
+        sort_order: 1,
+        created_at: "2026-05-15T00:01:00Z",
+        updated_at: "2026-05-15T00:01:00Z",
+      },
+      {
+        workspace_id: "ws-gamma",
+        name: "Workspace Gamma",
+        system_message: "Gamma system",
+        selected_model: {
+          model_id: "gpt-5.4-nano",
+          label: "gpt-5.4-nano",
+          is_enabled: true,
+          is_default_workspace_model: true,
+        },
+        model_settings: {
+          temperature: 0.7,
+        },
+        sort_order: 2,
+        created_at: "2026-05-15T00:02:00Z",
+        updated_at: "2026-05-15T00:02:00Z",
+      },
+    ]);
+    mockedListWorkspaceConversations.mockResolvedValue([]);
+    mockedReorderWorkspaces.mockResolvedValue([
+      {
+        workspace_id: "ws-beta",
+        name: "Workspace Beta",
+        system_message: "Beta system",
+        selected_model: {
+          model_id: "gpt-5.4-nano",
+          label: "gpt-5.4-nano",
+          is_enabled: true,
+          is_default_workspace_model: true,
+        },
+        model_settings: {
+          temperature: 0.7,
+        },
+        sort_order: 0,
+        created_at: "2026-05-15T00:01:00Z",
+        updated_at: "2026-05-15T00:03:00Z",
+      },
+      {
+        workspace_id: "ws-alpha",
+        name: "Workspace Alpha",
+        system_message: "Alpha system",
+        selected_model: {
+          model_id: "gpt-5.4-nano",
+          label: "gpt-5.4-nano",
+          is_enabled: true,
+          is_default_workspace_model: true,
+        },
+        model_settings: {
+          temperature: 0.7,
+        },
+        sort_order: 1,
+        created_at: "2026-05-15T00:00:00Z",
+        updated_at: "2026-05-15T00:03:00Z",
+      },
+      {
+        workspace_id: "ws-gamma",
+        name: "Workspace Gamma",
+        system_message: "Gamma system",
+        selected_model: {
+          model_id: "gpt-5.4-nano",
+          label: "gpt-5.4-nano",
+          is_enabled: true,
+          is_default_workspace_model: true,
+        },
+        model_settings: {
+          temperature: 0.7,
+        },
+        sort_order: 2,
+        created_at: "2026-05-15T00:02:00Z",
+        updated_at: "2026-05-15T00:03:00Z",
+      },
+    ]);
+
+    render(<App />);
+
+    expect(await screen.findByRole("button", { name: "Workspace Alpha gpt-5.4-nano" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Move up Workspace Beta" }));
+
+    expect(mockedReorderWorkspaces).toHaveBeenCalledWith(["ws-beta", "ws-alpha", "ws-gamma"]);
+
+    const orderedWorkspaceNames = Array.from(
+      document.querySelectorAll(".workspace-row > .conversation-item"),
+      (element) => element.querySelector("strong")?.textContent,
+    ).filter((value): value is string => Boolean(value));
+
+    expect(orderedWorkspaceNames.slice(0, 3)).toEqual([
+      "Workspace Beta",
+      "Workspace Alpha",
+      "Workspace Gamma",
     ]);
   });
 
@@ -187,11 +424,11 @@ describe("App", () => {
 
     render(<App />);
 
-    expect(await screen.findByRole("button", { name: /Workspace Alpha/ })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Workspace Alpha gpt-5.4-nano" })).toBeInTheDocument();
     expect(await screen.findByText("Alpha convo")).toBeInTheDocument();
     expect(mockedListWorkspaceConversations).toHaveBeenCalledWith("ws-alpha");
 
-    await user.click(screen.getByRole("button", { name: /Workspace Beta/ }));
+    await user.click(screen.getByRole("button", { name: "Workspace Beta gpt-5.4-nano" }));
 
     expect(await screen.findByText("Beta convo")).toBeInTheDocument();
     expect(mockedListWorkspaceConversations).toHaveBeenCalledWith("ws-beta");
@@ -257,7 +494,7 @@ describe("App", () => {
     await user.type(screen.getByLabelText("工作區名稱"), "New Workspace");
     await user.click(screen.getByLabelText("建立工作區"));
 
-    expect(await screen.findByRole("button", { name: /New Workspace/ })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "New Workspace gpt-5.4-nano" })).toBeInTheDocument();
 
     await user.type(screen.getByLabelText("訊息輸入框"), "第一句話");
     await user.click(screen.getByLabelText("Send message"));
@@ -333,7 +570,7 @@ describe("App", () => {
 
     render(<App />);
 
-    expect(await screen.findByRole("button", { name: /Workspace One/ })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Workspace One gpt-5.4-nano" })).toBeInTheDocument();
     await user.type(screen.getByLabelText("訊息輸入框"), "Stop");
     await user.click(screen.getByLabelText("Send message"));
 
@@ -457,7 +694,7 @@ describe("App", () => {
     await user.clear(systemMessageInput);
     await user.type(systemMessageInput, "Saved system message");
 
-    expect(screen.getByRole("button", { name: /Workspace Alpha/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Workspace Alpha gpt-5.4-nano" })).toBeInTheDocument();
     expect(mockedUpdateWorkspace).not.toHaveBeenCalled();
 
     await user.click(screen.getByRole("button", { name: "Save settings" }));
@@ -471,7 +708,7 @@ describe("App", () => {
       },
     });
     expect(await screen.findByRole("heading", { name: "Workspace Settings" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Workspace Renamed/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Workspace Renamed gpt-5.4-nano" })).toBeInTheDocument();
   });
 
   it("warns before discarding pending general settings", async () => {
@@ -515,14 +752,14 @@ describe("App", () => {
     await user.type(screen.getByLabelText("Workspace Name"), "Workspace Draft");
 
     confirmSpy.mockReturnValueOnce(false);
-    await user.click(screen.getByRole("button", { name: /Workspace Beta/ }));
+    await user.click(screen.getByRole("button", { name: "Workspace Beta gpt-5.4-nano" }));
 
     expect(confirmSpy).toHaveBeenCalled();
     expect(screen.getByRole("heading", { name: "Workspace Settings" })).toBeInTheDocument();
     expect(screen.getByDisplayValue("Workspace Draft")).toBeInTheDocument();
 
     confirmSpy.mockReturnValueOnce(true);
-    await user.click(screen.getByRole("button", { name: /Workspace Beta/ }));
+    await user.click(screen.getByRole("button", { name: "Workspace Beta gpt-5.4-nano" }));
 
     expect(await screen.findByText("開始一段新對話")).toBeInTheDocument();
     expect(screen.getByText("Workspace Beta | gpt-5.4-nano")).toBeInTheDocument();

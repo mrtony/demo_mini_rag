@@ -26,6 +26,7 @@ from .schemas import (
     ModelCatalogSummary,
     StoredMessage,
     WorkspaceCreateRequest,
+    WorkspaceReorderRequest,
     WorkspaceUpdateRequest,
     WorkspaceSummary,
 )
@@ -120,6 +121,7 @@ def _serialize_workspace(workspace: Workspace) -> WorkspaceSummary:
         system_message=workspace.system_message,
         selected_model=_serialize_model(workspace.selected_model),
         model_settings=_workspace_model_settings_map(workspace),
+        sort_order=workspace.sort_order,
         created_at=workspace.created_at,
         updated_at=workspace.updated_at,
     )
@@ -135,6 +137,19 @@ def _serialize_conversation_summary(conversation: Conversation) -> ConversationS
 
 
 async def _load_workspace_or_404(session: AsyncSession, public_id: str) -> Workspace:
+    return await _load_workspace_by_public_id_or_404(session, public_id, include_archived=False)
+
+
+async def _load_workspace_by_public_id_or_404(
+    session: AsyncSession,
+    public_id: str,
+    *,
+    include_archived: bool,
+) -> Workspace:
+    conditions = [Workspace.workspace_id == public_id]
+    if not include_archived:
+        conditions.append(Workspace.is_archived.is_(False))
+
     result = await session.execute(
         select(Workspace)
         .options(
@@ -142,7 +157,7 @@ async def _load_workspace_or_404(session: AsyncSession, public_id: str) -> Works
             selectinload(Workspace.model_settings),
         )
         .execution_options(populate_existing=True)
-        .where(Workspace.workspace_id == public_id, Workspace.is_archived.is_(False))
+        .where(*conditions)
     )
     workspace = result.scalar_one_or_none()
     if workspace is None:
@@ -363,6 +378,22 @@ async def list_workspaces(session: AsyncSession = Depends(get_db_session)) -> li
     return [_serialize_workspace(item) for item in result.scalars().all()]
 
 
+@router.get("/workspaces/archived", response_model=list[WorkspaceSummary])
+async def list_archived_workspaces(
+    session: AsyncSession = Depends(get_db_session),
+) -> list[WorkspaceSummary]:
+    result = await session.execute(
+        select(Workspace)
+        .options(
+            selectinload(Workspace.selected_model),
+            selectinload(Workspace.model_settings),
+        )
+        .where(Workspace.is_archived.is_(True))
+        .order_by(Workspace.sort_order.asc(), Workspace.id.asc())
+    )
+    return [_serialize_workspace(item) for item in result.scalars().all()]
+
+
 @router.get("/workspaces/default-model", response_model=ModelCatalogSummary)
 async def get_default_workspace_model(session: AsyncSession = Depends(get_db_session)) -> ModelCatalogSummary:
     model = await _load_default_workspace_model(session)
@@ -422,6 +453,80 @@ async def update_workspace(
 
     updated_workspace = await _load_workspace_or_404(session, workspace_id)
     return _serialize_workspace(updated_workspace)
+
+
+@router.post("/workspaces/reorder", response_model=list[WorkspaceSummary])
+async def reorder_workspaces(
+    payload: WorkspaceReorderRequest,
+    session: AsyncSession = Depends(get_db_session),
+) -> list[WorkspaceSummary]:
+    result = await session.execute(
+        select(Workspace)
+        .options(
+            selectinload(Workspace.selected_model),
+            selectinload(Workspace.model_settings),
+        )
+        .where(Workspace.is_archived.is_(False))
+    )
+    active_workspaces = list(result.scalars().all())
+    workspaces_by_public_id = {workspace.workspace_id: workspace for workspace in active_workspaces}
+    provided_ids = payload.workspace_ids
+
+    if len(provided_ids) != len(active_workspaces) or set(provided_ids) != set(workspaces_by_public_id):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="workspace_ids must include each active Workspace exactly once",
+        )
+
+    for sort_order, workspace_id in enumerate(provided_ids):
+        workspace = workspaces_by_public_id[workspace_id]
+        workspace.sort_order = sort_order
+        workspace.updated_at = _utc_now()
+
+    await session.commit()
+
+    refreshed_result = await session.execute(
+        select(Workspace)
+        .options(
+            selectinload(Workspace.selected_model),
+            selectinload(Workspace.model_settings),
+        )
+        .where(Workspace.is_archived.is_(False))
+        .order_by(Workspace.sort_order.asc(), Workspace.id.asc())
+    )
+    return [_serialize_workspace(item) for item in refreshed_result.scalars().all()]
+
+
+@router.post("/workspaces/{workspace_id}/archive", response_model=WorkspaceSummary)
+async def archive_workspace(
+    workspace_id: str,
+    session: AsyncSession = Depends(get_db_session),
+) -> WorkspaceSummary:
+    workspace = await _load_workspace_or_404(session, workspace_id)
+    workspace.is_archived = True
+    workspace.updated_at = _utc_now()
+    await session.commit()
+
+    archived_workspace = await _load_workspace_by_public_id_or_404(
+        session,
+        workspace_id,
+        include_archived=True,
+    )
+    return _serialize_workspace(archived_workspace)
+
+
+@router.post("/workspaces/{workspace_id}/restore", response_model=WorkspaceSummary)
+async def restore_workspace(
+    workspace_id: str,
+    session: AsyncSession = Depends(get_db_session),
+) -> WorkspaceSummary:
+    workspace = await _load_workspace_by_public_id_or_404(session, workspace_id, include_archived=True)
+    workspace.is_archived = False
+    workspace.updated_at = _utc_now()
+    await session.commit()
+
+    restored_workspace = await _load_workspace_or_404(session, workspace_id)
+    return _serialize_workspace(restored_workspace)
 
 
 @router.get("/workspaces/{workspace_id}/conversations", response_model=list[ConversationSummary])

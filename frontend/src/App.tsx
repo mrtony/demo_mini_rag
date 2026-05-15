@@ -3,13 +3,17 @@ import { useEffect, useRef, useState } from "react";
 
 import "./App.css";
 import {
+  archiveWorkspace,
   createWorkspace,
   getDefaultWorkspaceModel,
   getConversation,
+  listArchivedWorkspaces,
   listModels,
   listWorkspaceConversations,
   listWorkspaces,
   openChatStream,
+  reorderWorkspaces,
+  restoreWorkspace,
   stopConversation,
   toChatBubbles,
   updateWorkspace,
@@ -70,6 +74,18 @@ function sortConversations(conversations: ConversationSummary[]): ConversationSu
   return [...conversations].sort(
     (left, right) => new Date(right.updated_at).getTime() - new Date(left.updated_at).getTime(),
   );
+}
+
+
+function sortWorkspaces(workspaces: WorkspaceSummary[]): WorkspaceSummary[] {
+  return [...workspaces].sort((left, right) => {
+    const leftOrder = left.sort_order ?? Number.MAX_SAFE_INTEGER;
+    const rightOrder = right.sort_order ?? Number.MAX_SAFE_INTEGER;
+    if (leftOrder !== rightOrder) {
+      return leftOrder - rightOrder;
+    }
+    return new Date(left.created_at).getTime() - new Date(right.created_at).getTime();
+  });
 }
 
 
@@ -181,6 +197,7 @@ function hasValidationErrors(errors: SettingsValidationErrors): boolean {
 
 export default function App() {
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
+  const [archivedWorkspaces, setArchivedWorkspaces] = useState<WorkspaceSummary[]>([]);
   const [defaultWorkspaceModel, setDefaultWorkspaceModel] = useState<ModelCatalogSummary | null>(null);
   const [modelCatalog, setModelCatalog] = useState<ModelCatalogEntry[]>([]);
   const [conversationSummariesByWorkspaceId, setConversationSummariesByWorkspaceId] = useState<
@@ -202,6 +219,7 @@ export default function App() {
 
   useEffect(() => {
     void refreshWorkspaces();
+    void refreshArchivedWorkspaces();
     void refreshDefaultWorkspaceModel();
     void refreshModelCatalog();
   }, []);
@@ -221,7 +239,7 @@ export default function App() {
   async function refreshWorkspaces(preferredWorkspaceId?: string) {
     try {
       const data = await listWorkspaces();
-      setWorkspaces(data);
+      setWorkspaces(sortWorkspaces(data));
       setActiveWorkspaceId((current) => {
         if (preferredWorkspaceId && data.some((item) => item.workspace_id === preferredWorkspaceId)) {
           return preferredWorkspaceId;
@@ -231,6 +249,15 @@ export default function App() {
         }
         return data[0]?.workspace_id ?? null;
       });
+    } catch (error) {
+      setErrorMessage(getErrorMessage(error));
+    }
+  }
+
+  async function refreshArchivedWorkspaces() {
+    try {
+      const data = await listArchivedWorkspaces();
+      setArchivedWorkspaces(sortWorkspaces(data));
     } catch (error) {
       setErrorMessage(getErrorMessage(error));
     }
@@ -301,7 +328,7 @@ export default function App() {
     try {
       setErrorMessage(null);
       const createdWorkspace = await createWorkspace(trimmed);
-      setWorkspaces((current) => [...current, createdWorkspace]);
+      setWorkspaces((current) => sortWorkspaces([...current, createdWorkspace]));
       setConversationSummariesByWorkspaceId((current) => ({
         ...current,
         [createdWorkspace.workspace_id]: [],
@@ -347,6 +374,67 @@ export default function App() {
     setMessages([]);
     setDraft("");
     setErrorMessage(null);
+  }
+
+  async function handleArchiveWorkspace(workspaceId: string) {
+    try {
+      setErrorMessage(null);
+      const archivedWorkspace = await archiveWorkspace(workspaceId);
+      const remainingWorkspaces = workspaces.filter((item) => item.workspace_id !== workspaceId);
+      setWorkspaces(sortWorkspaces(remainingWorkspaces));
+      setArchivedWorkspaces((current) => sortWorkspaces([...current, archivedWorkspace]));
+
+      if (activeWorkspaceId === workspaceId) {
+        setIsSettingsOpen(false);
+        setSettingsDraft(null);
+        setActiveSettingsTab("general");
+        setActiveWorkspaceId(remainingWorkspaces[0]?.workspace_id ?? null);
+        setActiveConversationId(null);
+        setMessages([]);
+        setDraft("");
+      }
+    } catch (error) {
+      setErrorMessage(getErrorMessage(error));
+    }
+  }
+
+  async function handleRestoreWorkspace(workspaceId: string) {
+    try {
+      setErrorMessage(null);
+      const restoredWorkspace = await restoreWorkspace(workspaceId);
+      setArchivedWorkspaces((current) => current.filter((item) => item.workspace_id !== workspaceId));
+      setWorkspaces((current) => sortWorkspaces([...current, restoredWorkspace]));
+      setConversationSummariesByWorkspaceId((current) => ({
+        ...current,
+        [restoredWorkspace.workspace_id]: current[restoredWorkspace.workspace_id] ?? [],
+      }));
+      setActiveWorkspaceId(restoredWorkspace.workspace_id);
+      setActiveConversationId(null);
+      setMessages([]);
+      setDraft("");
+    } catch (error) {
+      setErrorMessage(getErrorMessage(error));
+    }
+  }
+
+  async function handleMoveWorkspace(workspaceId: string, direction: -1 | 1) {
+    const currentIndex = workspaces.findIndex((item) => item.workspace_id === workspaceId);
+    const targetIndex = currentIndex + direction;
+    if (currentIndex < 0 || targetIndex < 0 || targetIndex >= workspaces.length) {
+      return;
+    }
+
+    const nextWorkspaces = [...workspaces];
+    const [workspace] = nextWorkspaces.splice(currentIndex, 1);
+    nextWorkspaces.splice(targetIndex, 0, workspace);
+
+    try {
+      setErrorMessage(null);
+      const reordered = await reorderWorkspaces(nextWorkspaces.map((item) => item.workspace_id));
+      setWorkspaces(sortWorkspaces(reordered));
+    } catch (error) {
+      setErrorMessage(getErrorMessage(error));
+    }
   }
 
   function upsertConversation(workspaceId: string, conversation: ConversationSummary) {
@@ -674,17 +762,80 @@ export default function App() {
         </div>
 
         <div className="conversation-list">
-          {workspaces.map((workspace) => (
-            <button
-              key={workspace.workspace_id}
-              type="button"
-              className={`conversation-item${workspace.workspace_id === activeWorkspaceId ? " active" : ""}`}
-              onClick={() => selectWorkspace(workspace.workspace_id)}
-            >
-              <strong>{workspace.name}</strong>
-              <span>{workspace.selected_model.label}</span>
-            </button>
+          {workspaces.map((workspace, index) => (
+            <div key={workspace.workspace_id} className="workspace-row">
+              <button
+                type="button"
+                className={`conversation-item${workspace.workspace_id === activeWorkspaceId ? " active" : ""}`}
+                onClick={() => selectWorkspace(workspace.workspace_id)}
+              >
+                <strong>{workspace.name}</strong>
+                <span>{workspace.selected_model.label}</span>
+              </button>
+              <div className="workspace-actions">
+                <button
+                  type="button"
+                  className="workspace-action-button"
+                  onClick={() => void handleMoveWorkspace(workspace.workspace_id, -1)}
+                  aria-label={`Move up ${workspace.name}`}
+                  disabled={index === 0}
+                >
+                  ↑
+                </button>
+                <button
+                  type="button"
+                  className="workspace-action-button"
+                  onClick={() => void handleMoveWorkspace(workspace.workspace_id, 1)}
+                  aria-label={`Move down ${workspace.name}`}
+                  disabled={index === workspaces.length - 1}
+                >
+                  ↓
+                </button>
+                <button
+                  type="button"
+                  className="workspace-action-button warn"
+                  onClick={() => void handleArchiveWorkspace(workspace.workspace_id)}
+                  aria-label={`Archive ${workspace.name}`}
+                >
+                  Archive
+                </button>
+              </div>
+            </div>
           ))}
+        </div>
+
+        <div className="sidebar-section">
+          <div className="sidebar-header">
+            <div>
+              <h2 className="sidebar-title">Archived Workspaces</h2>
+              <p className="sidebar-subtitle">Restore before using them again</p>
+            </div>
+          </div>
+
+          <div className="conversation-list">
+            {archivedWorkspaces.length === 0 ? (
+              <div className="sidebar-empty">No archived workspaces</div>
+            ) : (
+              archivedWorkspaces.map((workspace) => (
+                <div key={workspace.workspace_id} className="workspace-row archived">
+                  <div className="conversation-item archived">
+                    <strong>{workspace.name}</strong>
+                    <span>{workspace.selected_model.label}</span>
+                  </div>
+                  <div className="workspace-actions">
+                    <button
+                      type="button"
+                      className="workspace-action-button"
+                      onClick={() => void handleRestoreWorkspace(workspace.workspace_id)}
+                      aria-label={`Restore ${workspace.name}`}
+                    >
+                      Restore
+                    </button>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
         </div>
 
         <div className="sidebar-header">
