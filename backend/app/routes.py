@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from contextlib import suppress
 from datetime import datetime, timezone
@@ -9,18 +10,19 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from .chat_events import ChatStreamState
 from .config import Settings, get_settings
 from .db import SessionLocal, get_db_session
-from .models import Conversation, Message, ModelCatalog, Workspace
+from .models import Conversation, Message, ModelCatalog, Workspace, WorkspaceModelSetting
 from .schemas import (
     ChatStreamRequest,
     ConversationDetail,
     ConversationSummary,
+    ModelCatalogEntry,
     ModelCatalogSummary,
     StoredMessage,
     WorkspaceCreateRequest,
@@ -54,6 +56,34 @@ def _temporary_title(message: str, limit: int) -> str:
     return message.strip().replace("\n", " ")[:limit] or "New chat"
 
 
+def _load_json_object(raw_value: str) -> dict[str, Any]:
+    try:
+        value = json.loads(raw_value)
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _serialize_setting_value(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _deserialize_setting_value(raw_value: str) -> Any:
+    try:
+        return json.loads(raw_value)
+    except json.JSONDecodeError:
+        return raw_value
+
+
+def _model_settings_schema(model: ModelCatalog) -> dict[str, dict[str, Any]]:
+    raw_value = _load_json_object(model.settings_schema_json)
+    return {key: value for key, value in raw_value.items() if isinstance(value, dict)}
+
+
+def _model_settings_defaults(model: ModelCatalog) -> dict[str, Any]:
+    return _load_json_object(model.settings_defaults_json)
+
+
 def _serialize_model(model: ModelCatalog) -> ModelCatalogSummary:
     return ModelCatalogSummary(
         model_id=model.model_id,
@@ -63,12 +93,33 @@ def _serialize_model(model: ModelCatalog) -> ModelCatalogSummary:
     )
 
 
+def _serialize_model_entry(model: ModelCatalog) -> ModelCatalogEntry:
+    return ModelCatalogEntry(
+        model_id=model.model_id,
+        label=model.label,
+        is_enabled=model.is_enabled,
+        is_default_workspace_model=model.is_default_workspace_model,
+        supports_system_message=model.supports_system_message,
+        settings_schema=_model_settings_schema(model),
+        settings_defaults=_model_settings_defaults(model),
+        sort_order=model.sort_order,
+    )
+
+
+def _workspace_model_settings_map(workspace: Workspace) -> dict[str, Any]:
+    return {
+        item.setting_key: _deserialize_setting_value(item.setting_value_json)
+        for item in workspace.model_settings
+    }
+
+
 def _serialize_workspace(workspace: Workspace) -> WorkspaceSummary:
     return WorkspaceSummary(
         workspace_id=workspace.workspace_id,
         name=workspace.name,
         system_message=workspace.system_message,
         selected_model=_serialize_model(workspace.selected_model),
+        model_settings=_workspace_model_settings_map(workspace),
         created_at=workspace.created_at,
         updated_at=workspace.updated_at,
     )
@@ -86,7 +137,11 @@ def _serialize_conversation_summary(conversation: Conversation) -> ConversationS
 async def _load_workspace_or_404(session: AsyncSession, public_id: str) -> Workspace:
     result = await session.execute(
         select(Workspace)
-        .options(selectinload(Workspace.selected_model))
+        .options(
+            selectinload(Workspace.selected_model),
+            selectinload(Workspace.model_settings),
+        )
+        .execution_options(populate_existing=True)
         .where(Workspace.workspace_id == public_id, Workspace.is_archived.is_(False))
     )
     workspace = result.scalar_one_or_none()
@@ -101,7 +156,9 @@ async def _load_conversation_or_404(session: AsyncSession, public_id: str) -> Co
         .options(
             selectinload(Conversation.messages),
             selectinload(Conversation.workspace).selectinload(Workspace.selected_model),
+            selectinload(Conversation.workspace).selectinload(Workspace.model_settings),
         )
+        .execution_options(populate_existing=True)
         .where(Conversation.conversation_id == public_id)
     )
     conversation = result.scalar_one_or_none()
@@ -132,6 +189,102 @@ async def _load_default_workspace_model(session: AsyncSession) -> ModelCatalog:
             detail="Default Workspace Model is not configured",
         )
     return model
+
+
+async def _load_enabled_model_or_422(session: AsyncSession, model_id: str) -> ModelCatalog:
+    result = await session.execute(select(ModelCatalog).where(ModelCatalog.model_id == model_id))
+    model = result.scalar_one_or_none()
+    if model is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Selected Model does not exist in the Model Catalog",
+        )
+    if not model.is_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Selected Model must be enabled before saving Workspace Settings",
+        )
+    return model
+
+
+def _coerce_model_setting_value(setting_key: str, schema: dict[str, Any], value: Any) -> Any:
+    setting_type = schema.get("type")
+
+    if setting_type == "number":
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=f"{setting_key} must be a number",
+            )
+        numeric_value = float(value)
+        min_value = schema.get("min")
+        max_value = schema.get("max")
+        if isinstance(min_value, (int, float)) and numeric_value < float(min_value):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=f"{setting_key} must be greater than or equal to {min_value}",
+            )
+        if isinstance(max_value, (int, float)) and numeric_value > float(max_value):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=f"{setting_key} must be less than or equal to {max_value}",
+            )
+        return numeric_value
+
+    if setting_type == "enum":
+        if not isinstance(value, str):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=f"{setting_key} must be a string",
+            )
+        options = schema.get("options", [])
+        allowed_values = {
+            option.get("value")
+            for option in options
+            if isinstance(option, dict) and isinstance(option.get("value"), str)
+        }
+        if value not in allowed_values:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=f"{setting_key} is not supported by the Selected Model",
+            )
+        return value
+
+    raise HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        detail=f"{setting_key} uses an unsupported schema type",
+    )
+
+
+def _validated_model_settings(model: ModelCatalog, payload_settings: dict[str, Any]) -> dict[str, Any]:
+    schema = _model_settings_schema(model)
+    defaults = _model_settings_defaults(model)
+    applicable_settings = defaults | {
+        key: value for key, value in payload_settings.items() if key in schema
+    }
+    return {
+        key: _coerce_model_setting_value(key, schema[key], value)
+        for key, value in applicable_settings.items()
+    }
+
+
+async def _replace_workspace_model_settings(
+    session: AsyncSession,
+    workspace: Workspace,
+    model_settings: dict[str, Any],
+) -> None:
+    await session.execute(
+        delete(WorkspaceModelSetting).where(WorkspaceModelSetting.workspace_fk == workspace.id)
+    )
+
+    for setting_key, setting_value in model_settings.items():
+        session.add(
+            WorkspaceModelSetting(
+                workspace_fk=workspace.id,
+                setting_key=setting_key,
+                setting_value_json=_serialize_setting_value(setting_value),
+            )
+        )
 
 
 async def _create_message(
@@ -200,7 +353,10 @@ async def _run_cleanup(awaitable: Any) -> None:
 async def list_workspaces(session: AsyncSession = Depends(get_db_session)) -> list[WorkspaceSummary]:
     result = await session.execute(
         select(Workspace)
-        .options(selectinload(Workspace.selected_model))
+        .options(
+            selectinload(Workspace.selected_model),
+            selectinload(Workspace.model_settings),
+        )
         .where(Workspace.is_archived.is_(False))
         .order_by(Workspace.sort_order.asc(), Workspace.id.asc())
     )
@@ -211,6 +367,16 @@ async def list_workspaces(session: AsyncSession = Depends(get_db_session)) -> li
 async def get_default_workspace_model(session: AsyncSession = Depends(get_db_session)) -> ModelCatalogSummary:
     model = await _load_default_workspace_model(session)
     return _serialize_model(model)
+
+
+@router.get("/models", response_model=list[ModelCatalogEntry])
+async def list_models(session: AsyncSession = Depends(get_db_session)) -> list[ModelCatalogEntry]:
+    result = await session.execute(
+        select(ModelCatalog)
+        .where(ModelCatalog.is_enabled.is_(True))
+        .order_by(ModelCatalog.sort_order.asc(), ModelCatalog.id.asc())
+    )
+    return [_serialize_model_entry(item) for item in result.scalars().all()]
 
 
 @router.post("/workspaces", response_model=WorkspaceSummary, status_code=status.HTTP_201_CREATED)
@@ -230,6 +396,8 @@ async def create_workspace(
         is_archived=False,
     )
     session.add(workspace)
+    await session.flush()
+    await _replace_workspace_model_settings(session, workspace, _model_settings_defaults(default_model))
     await session.commit()
 
     created_workspace = await _load_workspace_or_404(session, workspace.workspace_id)
@@ -243,9 +411,13 @@ async def update_workspace(
     session: AsyncSession = Depends(get_db_session),
 ) -> WorkspaceSummary:
     workspace = await _load_workspace_or_404(session, workspace_id)
+    selected_model = await _load_enabled_model_or_422(session, payload.selected_model_id)
+    model_settings = _validated_model_settings(selected_model, payload.model_settings)
     workspace.name = payload.name
     workspace.system_message = payload.system_message
+    workspace.selected_model_fk = selected_model.id
     workspace.updated_at = _utc_now()
+    await _replace_workspace_model_settings(session, workspace, model_settings)
     await session.commit()
 
     updated_workspace = await _load_workspace_or_404(session, workspace_id)
@@ -321,7 +493,7 @@ async def stream_chat(
         if normalized_conversation_id is None:
             if not payload.workspace_id:
                 raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                     detail="workspace_id is required for a new Conversation",
                 )
             workspace = await _load_workspace_or_404(session, payload.workspace_id)
@@ -351,6 +523,7 @@ async def stream_chat(
         chat_service.configure_runtime(
             system_prompt=workspace.system_message,
             chat_model=workspace.selected_model.model_id,
+            model_settings=_workspace_model_settings_map(workspace),
         )
 
         conversation_pk = conversation.id

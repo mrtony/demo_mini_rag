@@ -6,6 +6,7 @@ import {
   createWorkspace,
   getDefaultWorkspaceModel,
   getConversation,
+  listModels,
   listWorkspaceConversations,
   listWorkspaces,
   openChatStream,
@@ -18,6 +19,8 @@ import { readSseStream } from "./lib/sse";
 import type {
   ChatBubble,
   ConversationSummary,
+  ModelCatalogEntry,
+  ModelSettingSchema,
   ModelCatalogSummary,
   ParsedSseEvent,
   WorkspaceSummary,
@@ -30,11 +33,15 @@ type WorkspaceSettingsDraft = {
   workspaceId: string;
   name: string;
   systemMessage: string;
+  selectedModelId: string;
+  modelSettings: Record<string, string | number>;
 };
 
 type SettingsValidationErrors = {
   name?: string;
   systemMessage?: string;
+  selectedModelId?: string;
+  modelSettings: Record<string, string>;
 };
 
 
@@ -71,34 +78,111 @@ function createSettingsDraft(workspace: WorkspaceSummary): WorkspaceSettingsDraf
     workspaceId: workspace.workspace_id,
     name: workspace.name,
     systemMessage: workspace.system_message,
+    selectedModelId: workspace.selected_model.model_id,
+    modelSettings: { ...(workspace.model_settings ?? {}) },
   };
 }
 
+function normalizeModelSettings(
+  settings: Record<string, string | number> | undefined,
+): Record<string, string | number> {
+  if (!settings) {
+    return {};
+  }
+  return Object.keys(settings)
+    .sort()
+    .reduce<Record<string, string | number>>((accumulator, key) => {
+      accumulator[key] = settings[key];
+      return accumulator;
+    }, {});
+}
 
-function getSettingsValidationErrors(draft: WorkspaceSettingsDraft | null): SettingsValidationErrors {
-  if (draft === null) {
+
+function createModelSettingsForModel(
+  model: ModelCatalogEntry | null,
+  currentSettings: Record<string, string | number>,
+): Record<string, string | number> {
+  if (model === null) {
     return {};
   }
 
-  const errors: SettingsValidationErrors = {};
+  return Object.keys(model.settings_schema).reduce<Record<string, string | number>>((accumulator, key) => {
+    if (key in currentSettings) {
+      accumulator[key] = currentSettings[key]!;
+      return accumulator;
+    }
+    const defaultValue = model.settings_defaults[key];
+    if (typeof defaultValue === "string" || typeof defaultValue === "number") {
+      accumulator[key] = defaultValue;
+    }
+    return accumulator;
+  }, {});
+}
+
+
+function getSettingsValidationErrors(
+  draft: WorkspaceSettingsDraft | null,
+  modelCatalog: ModelCatalogEntry[],
+): SettingsValidationErrors {
+  if (draft === null) {
+    return { modelSettings: {} };
+  }
+
+  const selectedModel = modelCatalog.find((item) => item.model_id === draft.selectedModelId) ?? null;
+  const errors: SettingsValidationErrors = { modelSettings: {} };
   if (draft.name.trim().length < 3) {
     errors.name = "Workspace Name must be at least three characters long";
   }
   if (draft.systemMessage.trim().length === 0) {
     errors.systemMessage = "System Message cannot be blank";
   }
+  if (!draft.selectedModelId.trim()) {
+    errors.selectedModelId = "Selected Model is required";
+  }
+  if (selectedModel === null) {
+    return errors;
+  }
+
+  Object.entries(selectedModel.settings_schema).forEach(([settingKey, schema]) => {
+    const value = draft.modelSettings[settingKey];
+    if (schema.type === "number") {
+      if (typeof value !== "number" || Number.isNaN(value)) {
+        errors.modelSettings[settingKey] = `${schema.label} must be a number`;
+        return;
+      }
+      if (typeof schema.min === "number" && value < schema.min) {
+        errors.modelSettings[settingKey] = `${schema.label} must be at least ${schema.min}`;
+        return;
+      }
+      if (typeof schema.max === "number" && value > schema.max) {
+        errors.modelSettings[settingKey] = `${schema.label} must be at most ${schema.max}`;
+      }
+      return;
+    }
+
+    const allowedValues = new Set((schema.options ?? []).map((option) => option.value));
+    if (typeof value !== "string" || !allowedValues.has(value)) {
+      errors.modelSettings[settingKey] = `${schema.label} is not supported by the Selected Model`;
+    }
+  });
   return errors;
 }
 
 
 function hasValidationErrors(errors: SettingsValidationErrors): boolean {
-  return Boolean(errors.name || errors.systemMessage);
+  return Boolean(
+    errors.name ||
+      errors.systemMessage ||
+      errors.selectedModelId ||
+      Object.keys(errors.modelSettings).length > 0,
+  );
 }
 
 
 export default function App() {
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
   const [defaultWorkspaceModel, setDefaultWorkspaceModel] = useState<ModelCatalogSummary | null>(null);
+  const [modelCatalog, setModelCatalog] = useState<ModelCatalogEntry[]>([]);
   const [conversationSummariesByWorkspaceId, setConversationSummariesByWorkspaceId] = useState<
     Record<string, ConversationSummary[]>
   >({});
@@ -111,6 +195,7 @@ export default function App() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [settingsDraft, setSettingsDraft] = useState<WorkspaceSettingsDraft | null>(null);
+  const [activeSettingsTab, setActiveSettingsTab] = useState<"general" | "model">("general");
   const abortRef = useRef<AbortController | null>(null);
   const activeAssistantBubbleRef = useRef<string | null>(null);
   const stopRequestedBubbleRef = useRef<string | null>(null);
@@ -118,6 +203,7 @@ export default function App() {
   useEffect(() => {
     void refreshWorkspaces();
     void refreshDefaultWorkspaceModel();
+    void refreshModelCatalog();
   }, []);
 
   useEffect(() => {
@@ -126,6 +212,7 @@ export default function App() {
       setMessages([]);
       setIsSettingsOpen(false);
       setSettingsDraft(null);
+      setActiveSettingsTab("general");
       return;
     }
     void refreshWorkspaceConversations(activeWorkspaceId);
@@ -158,6 +245,15 @@ export default function App() {
     }
   }
 
+  async function refreshModelCatalog() {
+    try {
+      const data = await listModels();
+      setModelCatalog(data);
+    } catch (error) {
+      setErrorMessage(getErrorMessage(error));
+    }
+  }
+
   async function refreshWorkspaceConversations(workspaceId: string) {
     try {
       const data = await listWorkspaceConversations(workspaceId);
@@ -185,6 +281,7 @@ export default function App() {
       setErrorMessage(null);
       setIsSettingsOpen(false);
       setSettingsDraft(null);
+      setActiveSettingsTab("general");
       const detail = await getConversation(conversationId);
       setActiveWorkspaceId(detail.workspace_id);
       setActiveConversationId(detail.conversation_id);
@@ -228,6 +325,7 @@ export default function App() {
     }
     setIsSettingsOpen(false);
     setSettingsDraft(null);
+    setActiveSettingsTab("general");
     setActiveConversationId(null);
     setMessages([]);
     setDraft("");
@@ -243,6 +341,7 @@ export default function App() {
     }
     setIsSettingsOpen(false);
     setSettingsDraft(null);
+    setActiveSettingsTab("general");
     setActiveWorkspaceId(workspaceId);
     setActiveConversationId(null);
     setMessages([]);
@@ -354,7 +453,12 @@ export default function App() {
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const trimmed = draft.trim();
-    if (!trimmed || isStreaming || activeWorkspaceId === null) {
+    if (
+      !trimmed ||
+      isStreaming ||
+      activeWorkspaceId === null ||
+      activeWorkspace?.selected_model.is_enabled === false
+    ) {
       return;
     }
 
@@ -433,21 +537,34 @@ export default function App() {
   }
 
   const activeWorkspace = workspaces.find((item) => item.workspace_id === activeWorkspaceId) ?? null;
+  const modelCatalogById = new Map(modelCatalog.map((item) => [item.model_id, item]));
   const settingsWorkspace =
     settingsDraft === null
       ? null
       : workspaces.find((item) => item.workspace_id === settingsDraft.workspaceId) ?? activeWorkspace;
-  const settingsValidationErrors = getSettingsValidationErrors(settingsDraft);
+  const settingsSelectedModel =
+    settingsDraft === null ? null : modelCatalogById.get(settingsDraft.selectedModelId) ?? null;
+  const settingsValidationErrors = getSettingsValidationErrors(settingsDraft, modelCatalog);
   const hasPendingSettings =
     settingsDraft !== null &&
     settingsWorkspace !== null &&
-    (settingsDraft.name !== settingsWorkspace.name || settingsDraft.systemMessage !== settingsWorkspace.system_message);
+    (settingsDraft.name !== settingsWorkspace.name ||
+      settingsDraft.systemMessage !== settingsWorkspace.system_message ||
+      settingsDraft.selectedModelId !== settingsWorkspace.selected_model.model_id ||
+      JSON.stringify(normalizeModelSettings(settingsDraft.modelSettings)) !==
+        JSON.stringify(normalizeModelSettings(settingsWorkspace.model_settings)));
   const canSaveSettings = hasPendingSettings && !hasValidationErrors(settingsValidationErrors);
   const visibleConversations = activeWorkspaceId ? conversationSummariesByWorkspaceId[activeWorkspaceId] ?? [] : [];
   const activeTitle =
     visibleConversations.find((item) => item.conversation_id === activeConversationId)?.conversation_title ??
     EMPTY_TITLE;
-  const showSendButton = !isStreaming && draft.trim().length > 0;
+  const isGenerationBlocked = activeWorkspace?.selected_model.is_enabled === false;
+  const showSendButton = !isStreaming && draft.trim().length > 0 && !isGenerationBlocked;
+  const selectedModelOptionMissing =
+    settingsDraft !== null &&
+    settingsWorkspace !== null &&
+    settingsDraft.selectedModelId === settingsWorkspace.selected_model.model_id &&
+    settingsSelectedModel === null;
 
   function canLeaveSettingsView(): boolean {
     if (!isSettingsOpen || !hasPendingSettings) {
@@ -461,6 +578,7 @@ export default function App() {
       return;
     }
     setErrorMessage(null);
+    setActiveSettingsTab("general");
     setIsSettingsOpen(true);
     setSettingsDraft(createSettingsDraft(activeWorkspace));
   }
@@ -471,6 +589,36 @@ export default function App() {
     }
     setIsSettingsOpen(false);
     setSettingsDraft(null);
+    setActiveSettingsTab("general");
+  }
+
+  function updateSelectedModel(nextModelId: string) {
+    setSettingsDraft((current) => {
+      if (current === null) {
+        return current;
+      }
+      const nextModel = modelCatalogById.get(nextModelId) ?? null;
+      return {
+        ...current,
+        selectedModelId: nextModelId,
+        modelSettings: createModelSettingsForModel(nextModel, current.modelSettings),
+      };
+    });
+  }
+
+  function updateModelSetting(settingKey: string, schema: ModelSettingSchema, rawValue: string) {
+    setSettingsDraft((current) => {
+      if (current === null) {
+        return current;
+      }
+      return {
+        ...current,
+        modelSettings: {
+          ...current.modelSettings,
+          [settingKey]: schema.type === "number" ? (rawValue === "" ? Number.NaN : Number(rawValue)) : rawValue,
+        },
+      };
+    });
   }
 
   async function saveWorkspaceSettings() {
@@ -483,11 +631,14 @@ export default function App() {
       const updatedWorkspace = await updateWorkspace(settingsDraft.workspaceId, {
         name: settingsDraft.name.trim(),
         system_message: settingsDraft.systemMessage.trim(),
+        selected_model_id: settingsDraft.selectedModelId,
+        model_settings: normalizeModelSettings(settingsDraft.modelSettings),
       });
       setWorkspaces((current) =>
         current.map((item) => (item.workspace_id === updatedWorkspace.workspace_id ? updatedWorkspace : item)),
       );
       setSettingsDraft(createSettingsDraft(updatedWorkspace));
+      setActiveSettingsTab("general");
       setIsSettingsOpen(true);
     } catch (error) {
       setErrorMessage(getErrorMessage(error));
@@ -603,44 +754,130 @@ export default function App() {
             <section className="messages settings-panel">
               <div className="settings-card">
                 <div className="settings-tabs" role="tablist" aria-label="Workspace settings tabs">
-                  <button type="button" className="settings-tab active" role="tab" aria-selected="true">
+                  <button
+                    type="button"
+                    className={`settings-tab${activeSettingsTab === "general" ? " active" : ""}`}
+                    role="tab"
+                    aria-selected={activeSettingsTab === "general"}
+                    onClick={() => setActiveSettingsTab("general")}
+                  >
                     General
+                  </button>
+                  <button
+                    type="button"
+                    className={`settings-tab${activeSettingsTab === "model" ? " active" : ""}`}
+                    role="tab"
+                    aria-selected={activeSettingsTab === "model"}
+                    onClick={() => setActiveSettingsTab("model")}
+                  >
+                    Model
                   </button>
                 </div>
 
-                <div className="settings-field">
-                  <label htmlFor="workspace-name-input">Workspace Name</label>
-                  <input
-                    id="workspace-name-input"
-                    value={settingsDraft.name}
-                    onChange={(nextEvent) =>
-                      setSettingsDraft((current) =>
-                        current === null ? current : { ...current, name: nextEvent.target.value },
-                      )
-                    }
-                    aria-label="Workspace Name"
-                  />
-                  {settingsValidationErrors.name ? (
-                    <div className="field-error">{settingsValidationErrors.name}</div>
-                  ) : null}
-                </div>
+                {activeSettingsTab === "general" ? (
+                  <>
+                    <div className="settings-field">
+                      <label htmlFor="workspace-name-input">Workspace Name</label>
+                      <input
+                        id="workspace-name-input"
+                        value={settingsDraft.name}
+                        onChange={(nextEvent) =>
+                          setSettingsDraft((current) =>
+                            current === null ? current : { ...current, name: nextEvent.target.value },
+                          )
+                        }
+                        aria-label="Workspace Name"
+                      />
+                      {settingsValidationErrors.name ? (
+                        <div className="field-error">{settingsValidationErrors.name}</div>
+                      ) : null}
+                    </div>
 
-                <div className="settings-field">
-                  <label htmlFor="system-message-input">System Message</label>
-                  <textarea
-                    id="system-message-input"
-                    value={settingsDraft.systemMessage}
-                    onChange={(nextEvent) =>
-                      setSettingsDraft((current) =>
-                        current === null ? current : { ...current, systemMessage: nextEvent.target.value },
-                      )
-                    }
-                    aria-label="System Message"
-                  />
-                  {settingsValidationErrors.systemMessage ? (
-                    <div className="field-error">{settingsValidationErrors.systemMessage}</div>
-                  ) : null}
-                </div>
+                    <div className="settings-field">
+                      <label htmlFor="system-message-input">System Message</label>
+                      <textarea
+                        id="system-message-input"
+                        value={settingsDraft.systemMessage}
+                        onChange={(nextEvent) =>
+                          setSettingsDraft((current) =>
+                            current === null ? current : { ...current, systemMessage: nextEvent.target.value },
+                          )
+                        }
+                        aria-label="System Message"
+                      />
+                      {settingsValidationErrors.systemMessage ? (
+                        <div className="field-error">{settingsValidationErrors.systemMessage}</div>
+                      ) : null}
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="settings-field">
+                      <label htmlFor="selected-model-input">Selected Model</label>
+                      <select
+                        id="selected-model-input"
+                        value={settingsDraft.selectedModelId}
+                        onChange={(nextEvent) => updateSelectedModel(nextEvent.target.value)}
+                        aria-label="Selected Model"
+                      >
+                        {selectedModelOptionMissing ? (
+                          <option value={settingsDraft.selectedModelId}>
+                            {settingsWorkspace.selected_model.label} (disabled)
+                          </option>
+                        ) : null}
+                        {modelCatalog.map((model) => (
+                          <option key={model.model_id} value={model.model_id}>
+                            {model.label}
+                          </option>
+                        ))}
+                      </select>
+                      {settingsValidationErrors.selectedModelId ? (
+                        <div className="field-error">{settingsValidationErrors.selectedModelId}</div>
+                      ) : null}
+                    </div>
+
+                    {settingsSelectedModel ? (
+                      Object.entries(settingsSelectedModel.settings_schema).map(([settingKey, schema]) => (
+                        <div key={settingKey} className="settings-field">
+                          <label htmlFor={`model-setting-${settingKey}`}>{schema.label}</label>
+                          {schema.type === "number" ? (
+                            <input
+                              id={`model-setting-${settingKey}`}
+                              type="number"
+                              min={schema.min}
+                              max={schema.max}
+                              step={schema.step ?? 0.1}
+                              value={String(settingsDraft.modelSettings[settingKey] ?? "")}
+                              onChange={(nextEvent) => updateModelSetting(settingKey, schema, nextEvent.target.value)}
+                              aria-label={schema.label}
+                            />
+                          ) : (
+                            <select
+                              id={`model-setting-${settingKey}`}
+                              value={String(settingsDraft.modelSettings[settingKey] ?? "")}
+                              onChange={(nextEvent) => updateModelSetting(settingKey, schema, nextEvent.target.value)}
+                              aria-label={schema.label}
+                            >
+                              {(schema.options ?? []).map((option) => (
+                                <option key={option.value} value={option.value}>
+                                  {option.label}
+                                </option>
+                              ))}
+                            </select>
+                          )}
+                          {schema.help_text ? <div className="settings-hint">{schema.help_text}</div> : null}
+                          {settingsValidationErrors.modelSettings[settingKey] ? (
+                            <div className="field-error">{settingsValidationErrors.modelSettings[settingKey]}</div>
+                          ) : null}
+                        </div>
+                      ))
+                    ) : (
+                      <div className="settings-hint">
+                        Select an enabled model to review the available Model-specific Settings.
+                      </div>
+                    )}
+                  </>
+                )}
 
                 <div className="settings-hint">
                   Pending settings stay local until you explicitly save them for future turns.
@@ -671,12 +908,16 @@ export default function App() {
                 <div className="empty-state">
                   <h3>
                     {activeWorkspace
-                      ? "\u958b\u59cb\u4e00\u6bb5\u65b0\u5c0d\u8a71"
+                      ? isGenerationBlocked
+                        ? "這個 Workspace 目前無法送出新對話"
+                        : "\u958b\u59cb\u4e00\u6bb5\u65b0\u5c0d\u8a71"
                       : "\u5148\u5efa\u7acb\u5de5\u4f5c\u5340"}
                   </h3>
                   <p>
                     {activeWorkspace
-                      ? "\u7b2c\u4e00\u53e5 User Prompt \u9001\u51fa\u5f8c\u624d\u6703\u5728\u9019\u500b Workspace \u5efa\u7acb Conversation\u3002"
+                      ? isGenerationBlocked
+                        ? "Selected Model is disabled for new generation. Open Workspace Settings and choose an enabled model."
+                        : "\u7b2c\u4e00\u53e5 User Prompt \u9001\u51fa\u5f8c\u624d\u6703\u5728\u9019\u500b Workspace \u5efa\u7acb Conversation\u3002"
                       : "\u5de6\u5074\u8f38\u5165 Workspace Name \u4e26\u5efa\u7acb\uff0c\u518d\u958b\u59cb\u5c0d\u8a71\u3002"}
                   </p>
                 </div>
@@ -703,10 +944,14 @@ export default function App() {
                   value={draft}
                   onChange={(nextEvent) => setDraft(nextEvent.target.value)}
                   placeholder={
-                    activeWorkspace ? "\u8f38\u5165\u8a0a\u606f..." : "\u5148\u5efa\u7acb\u6216\u9078\u64c7\u5de5\u4f5c\u5340"
+                    activeWorkspace
+                      ? isGenerationBlocked
+                        ? "請先在 Workspace Settings 選擇可用模型"
+                        : "\u8f38\u5165\u8a0a\u606f..."
+                      : "\u5148\u5efa\u7acb\u6216\u9078\u64c7\u5de5\u4f5c\u5340"
                   }
                   aria-label={"\u8a0a\u606f\u8f38\u5165\u6846"}
-                  disabled={activeWorkspaceId === null}
+                  disabled={activeWorkspaceId === null || isGenerationBlocked}
                 />
 
                 <div className="composer-actions">

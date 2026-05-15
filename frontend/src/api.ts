@@ -3,6 +3,7 @@ import type {
   ChatStreamRequest,
   ConversationDetail,
   ConversationSummary,
+  ModelCatalogEntry,
   ModelCatalogSummary,
   StoredMessage,
   WorkspaceSummary,
@@ -12,7 +13,16 @@ const API_BASE = import.meta.env.VITE_API_BASE ?? "";
 
 async function expectJson<T>(response: Response): Promise<T> {
   if (!response.ok) {
-    throw new Error(`Request failed with status ${response.status}`);
+    let message = `Request failed with status ${response.status}`;
+    try {
+      const payload = (await response.json()) as { detail?: string };
+      if (typeof payload.detail === "string" && payload.detail.trim().length > 0) {
+        message = payload.detail;
+      }
+    } catch {
+      // Ignore JSON parsing failures and keep the status-based message.
+    }
+    throw new Error(message);
   }
   return (await response.json()) as T;
 }
@@ -35,7 +45,12 @@ export async function createWorkspace(name: string): Promise<WorkspaceSummary> {
 
 export async function updateWorkspace(
   workspaceId: string,
-  payload: { name: string; system_message: string },
+  payload: {
+    name: string;
+    system_message: string;
+    selected_model_id: string;
+    model_settings: Record<string, string | number>;
+  },
 ): Promise<WorkspaceSummary> {
   const response = await fetch(`${API_BASE}/api/workspaces/${workspaceId}`, {
     method: "PUT",
@@ -50,6 +65,11 @@ export async function updateWorkspace(
 export async function getDefaultWorkspaceModel(): Promise<ModelCatalogSummary> {
   const response = await fetch(`${API_BASE}/api/workspaces/default-model`);
   return expectJson<ModelCatalogSummary>(response);
+}
+
+export async function listModels(): Promise<ModelCatalogEntry[]> {
+  const response = await fetch(`${API_BASE}/api/models`);
+  return expectJson<ModelCatalogEntry[]>(response);
 }
 
 export async function listWorkspaceConversations(workspaceId: string): Promise<ConversationSummary[]> {
@@ -76,7 +96,16 @@ export async function openChatStream(
   });
 
   if (!response.ok || response.body === null) {
-    throw new Error(`Streaming request failed with status ${response.status}`);
+    let message = `Streaming request failed with status ${response.status}`;
+    try {
+      const payload = (await response.json()) as { detail?: string };
+      if (typeof payload.detail === "string" && payload.detail.trim().length > 0) {
+        message = payload.detail;
+      }
+    } catch {
+      // Ignore JSON parsing failures and keep the status-based message.
+    }
+    throw new Error(message);
   }
   return response;
 }

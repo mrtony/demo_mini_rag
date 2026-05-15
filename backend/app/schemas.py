@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -17,6 +18,13 @@ class ModelCatalogSummary(BaseModel):
     is_default_workspace_model: bool
 
 
+class ModelCatalogEntry(ModelCatalogSummary):
+    supports_system_message: bool
+    settings_schema: dict[str, dict[str, Any]]
+    settings_defaults: dict[str, Any]
+    sort_order: int
+
+
 class WorkspaceCreateRequest(BaseModel):
     name: str = Field(min_length=3, max_length=120)
 
@@ -32,6 +40,8 @@ class WorkspaceCreateRequest(BaseModel):
 class WorkspaceUpdateRequest(BaseModel):
     name: str = Field(min_length=3, max_length=120)
     system_message: str = Field(min_length=1)
+    selected_model_id: str = Field(min_length=1)
+    model_settings: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("name")
     @classmethod
@@ -55,6 +65,7 @@ class WorkspaceSummary(BaseModel):
     name: str
     system_message: str
     selected_model: ModelCatalogSummary
+    model_settings: dict[str, Any]
     created_at: datetime
     updated_at: datetime
 

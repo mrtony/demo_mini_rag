@@ -98,8 +98,15 @@ def _requires_schema_reset(sync_connection) -> bool:
     table_names = set(inspector.get_table_names())
     if "conversations" not in table_names:
         return False
+    if "workspace_model_settings" not in table_names:
+        return True
     conversation_columns = {column["name"] for column in inspector.get_columns("conversations")}
-    return "workspace_fk" not in conversation_columns
+    model_catalog_columns = {column["name"] for column in inspector.get_columns("model_catalog")}
+    return (
+        "workspace_fk" not in conversation_columns
+        or "settings_schema_json" not in model_catalog_columns
+        or "settings_defaults_json" not in model_catalog_columns
+    )
 
 
 async def init_db() -> None:

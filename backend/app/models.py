@@ -15,6 +15,10 @@ class ModelCatalog(Base):
     provider: Mapped[str] = mapped_column(String(50), default="openai")
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     is_default_workspace_model: Mapped[bool] = mapped_column(Boolean, default=False)
+    supports_system_message: Mapped[bool] = mapped_column(Boolean, default=True)
+    settings_schema_json: Mapped[str] = mapped_column(Text, default="{}")
+    settings_defaults_json: Mapped[str] = mapped_column(Text, default="{}")
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -49,11 +53,40 @@ class Workspace(Base):
     )
 
     selected_model: Mapped[ModelCatalog] = relationship(back_populates="workspaces", lazy="selectin")
+    model_settings: Mapped[list["WorkspaceModelSetting"]] = relationship(
+        back_populates="workspace",
+        cascade="all, delete-orphan",
+        order_by="WorkspaceModelSetting.setting_key",
+        lazy="selectin",
+    )
     conversations: Mapped[list["Conversation"]] = relationship(
         back_populates="workspace",
         cascade="all, delete-orphan",
         lazy="selectin",
     )
+
+
+class WorkspaceModelSetting(Base):
+    __tablename__ = "workspace_model_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    workspace_fk: Mapped[int] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        index=True,
+    )
+    setting_key: Mapped[str] = mapped_column(String(120), index=True)
+    setting_value_json: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    workspace: Mapped[Workspace] = relationship(back_populates="model_settings", lazy="selectin")
 
 
 class Conversation(Base):

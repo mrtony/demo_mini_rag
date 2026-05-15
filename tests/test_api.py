@@ -2,11 +2,14 @@ import asyncio
 import json
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 
 from backend.app.chat_events import ChatEvent, ChatStreamState
+from backend.app import db as db_module
 from backend.app.config import get_settings
 from backend.app.main import app
+from backend.app.models import ModelCatalog, Workspace, WorkspaceModelSetting
 from backend.app.routes import get_chat_service
 
 
@@ -33,6 +36,15 @@ async def create_workspace(test_client, name: str = "Workspace Alpha") -> dict:
     return response.json()
 
 
+def expected_model_settings(model_id: str) -> dict:
+    if model_id == "gpt-5.4-nano":
+        return {"temperature": 0.7}
+    return {
+        "temperature": 1.0,
+        "reasoning_effort": "medium",
+    }
+
+
 @pytest.mark.asyncio
 async def test_reads_default_workspace_model_for_create_flow(test_client):
     settings = get_settings()
@@ -40,12 +52,31 @@ async def test_reads_default_workspace_model_for_create_flow(test_client):
     response = await test_client.get("/api/workspaces/default-model")
 
     assert response.status_code == 200
-    assert response.json() == {
-        "model_id": settings.chat_model,
-        "label": settings.chat_model,
-        "is_enabled": True,
-        "is_default_workspace_model": True,
-    }
+    payload = response.json()
+    assert payload["model_id"] == settings.chat_model
+    assert payload["label"].strip()
+    assert payload["is_enabled"] is True
+    assert payload["is_default_workspace_model"] is True
+
+
+@pytest.mark.asyncio
+async def test_lists_enabled_model_catalog_entries_with_dynamic_settings_metadata(test_client):
+    settings = get_settings()
+    response = await test_client.get("/api/models")
+
+    assert response.status_code == 200
+    payload = response.json()
+    model_ids = [item["model_id"] for item in payload]
+    assert settings.chat_model in model_ids
+    assert "gpt-5.4-nano" in model_ids
+    assert all(item["is_enabled"] is True for item in payload)
+    assert "gpt-4.1-classic" not in model_ids
+
+    default_model = next(item for item in payload if item["model_id"] == settings.chat_model)
+    assert default_model["settings_defaults"] == expected_model_settings(settings.chat_model)
+    assert default_model["settings_schema"]["temperature"]["type"] == "number"
+    if settings.chat_model == "gpt-5.4-mini":
+        assert default_model["settings_schema"]["reasoning_effort"]["type"] == "enum"
 
 
 @pytest.mark.asyncio
@@ -61,6 +92,7 @@ async def test_creates_workspace_with_default_settings_and_rejects_invalid_names
     assert payload["selected_model"]["model_id"] == settings.chat_model
     assert payload["selected_model"]["is_enabled"] is True
     assert payload["selected_model"]["is_default_workspace_model"] is True
+    assert payload["model_settings"] == expected_model_settings(settings.chat_model)
 
     short_name_response = await test_client.post("/api/workspaces", json={"name": "ab"})
     blank_name_response = await test_client.post("/api/workspaces", json={"name": "   "})
@@ -70,7 +102,7 @@ async def test_creates_workspace_with_default_settings_and_rejects_invalid_names
 
 
 @pytest.mark.asyncio
-async def test_updates_workspace_general_settings_and_validates_inputs(test_client):
+async def test_updates_workspace_settings_with_model_validation_and_obsolete_cleanup(test_client):
     workspace = await create_workspace(test_client, "Workspace Alpha")
 
     update_response = await test_client.put(
@@ -78,6 +110,12 @@ async def test_updates_workspace_general_settings_and_validates_inputs(test_clie
         json={
             "name": "Workspace Renamed",
             "system_message": "You are a focused assistant.",
+            "selected_model_id": "gpt-5.4-mini",
+            "model_settings": {
+                "temperature": 1.4,
+                "reasoning_effort": "high",
+                "unsupported_field": "drop me",
+            },
         },
     )
 
@@ -86,12 +124,49 @@ async def test_updates_workspace_general_settings_and_validates_inputs(test_clie
     assert payload["workspace_id"] == workspace["workspace_id"]
     assert payload["name"] == "Workspace Renamed"
     assert payload["system_message"] == "You are a focused assistant."
+    assert payload["selected_model"]["model_id"] == "gpt-5.4-mini"
+    assert payload["model_settings"] == {
+        "temperature": 1.4,
+        "reasoning_effort": "high",
+    }
+
+    second_update_response = await test_client.put(
+        f"/api/workspaces/{workspace['workspace_id']}",
+        json={
+            "name": "Workspace Renamed",
+            "system_message": "You are a focused assistant.",
+            "selected_model_id": "gpt-5.4-nano",
+            "model_settings": {
+                "temperature": 0.4,
+                "reasoning_effort": "minimal",
+            },
+        },
+    )
+    assert second_update_response.status_code == 200
+    assert second_update_response.json()["model_settings"] == {
+        "temperature": 0.4,
+    }
+
+    async with db_module.SessionLocal() as session:
+        result = await session.execute(
+            select(WorkspaceModelSetting.setting_key, WorkspaceModelSetting.setting_value_json).order_by(
+                WorkspaceModelSetting.setting_key.asc()
+            )
+        )
+        stored_settings = result.all()
+
+    assert stored_settings == [("temperature", "0.4")]
 
     short_name_response = await test_client.put(
         f"/api/workspaces/{workspace['workspace_id']}",
         json={
             "name": "ab",
             "system_message": "Still valid",
+            "selected_model_id": "gpt-5.4-mini",
+            "model_settings": {
+                "temperature": 1.0,
+                "reasoning_effort": "medium",
+            },
         },
     )
     blank_system_message_response = await test_client.put(
@@ -99,11 +174,41 @@ async def test_updates_workspace_general_settings_and_validates_inputs(test_clie
         json={
             "name": "Workspace Valid",
             "system_message": "   ",
+            "selected_model_id": "gpt-5.4-mini",
+            "model_settings": {
+                "temperature": 1.0,
+                "reasoning_effort": "medium",
+            },
+        },
+    )
+    invalid_model_setting_response = await test_client.put(
+        f"/api/workspaces/{workspace['workspace_id']}",
+        json={
+            "name": "Workspace Valid",
+            "system_message": "Still valid",
+            "selected_model_id": "gpt-5.4-mini",
+            "model_settings": {
+                "temperature": 4,
+                "reasoning_effort": "medium",
+            },
+        },
+    )
+    disabled_model_response = await test_client.put(
+        f"/api/workspaces/{workspace['workspace_id']}",
+        json={
+            "name": "Workspace Valid",
+            "system_message": "Still valid",
+            "selected_model_id": "gpt-4.1-classic",
+            "model_settings": {
+                "temperature": 1.0,
+            },
         },
     )
 
     assert short_name_response.status_code == 422
     assert blank_system_message_response.status_code == 422
+    assert invalid_model_setting_response.status_code == 422
+    assert disabled_model_response.status_code == 422
 
 
 @pytest.mark.asyncio
@@ -113,11 +218,18 @@ async def test_next_turn_uses_only_latest_saved_workspace_settings(test_client):
     class RecordingChatService:
         configure_calls: list[dict[str, str]] = []
 
-        def configure_runtime(self, *, system_prompt: str, chat_model: str) -> None:
+        def configure_runtime(
+            self,
+            *,
+            system_prompt: str,
+            chat_model: str,
+            model_settings: dict[str, object],
+        ) -> None:
             self.__class__.configure_calls.append(
                 {
                     "system_prompt": system_prompt,
                     "chat_model": chat_model,
+                    "model_settings": model_settings,
                 }
             )
 
@@ -154,6 +266,11 @@ async def test_next_turn_uses_only_latest_saved_workspace_settings(test_client):
             json={
                 "name": "Workspace Settings",
                 "system_message": "Only saved settings should apply.",
+                "selected_model_id": "gpt-5.4-mini",
+                "model_settings": {
+                    "temperature": 1.6,
+                    "reasoning_effort": "high",
+                },
             },
         )
         assert update_response.status_code == 200
@@ -173,10 +290,15 @@ async def test_next_turn_uses_only_latest_saved_workspace_settings(test_client):
             {
                 "system_prompt": workspace["system_message"],
                 "chat_model": workspace["selected_model"]["model_id"],
+                "model_settings": workspace["model_settings"],
             },
             {
                 "system_prompt": "Only saved settings should apply.",
-                "chat_model": workspace["selected_model"]["model_id"],
+                "chat_model": "gpt-5.4-mini",
+                "model_settings": {
+                    "temperature": 1.6,
+                    "reasoning_effort": "high",
+                },
             },
         ]
     finally:
@@ -346,9 +468,16 @@ async def test_stream_errors_emit_error_event_and_persist_error_status(test_clie
     workspace = await create_workspace(test_client, "Workspace Errors")
 
     class ErrorChatService:
-        def configure_runtime(self, *, system_prompt: str, chat_model: str) -> None:
+        def configure_runtime(
+            self,
+            *,
+            system_prompt: str,
+            chat_model: str,
+            model_settings: dict[str, object],
+        ) -> None:
             self.system_prompt = system_prompt
             self.chat_model = chat_model
+            self.model_settings = model_settings
 
         async def stream_chat(self, messages, user_message):
             yield ChatEvent(state=ChatStreamState.STARTED, response_id="resp_error_1")
@@ -392,6 +521,51 @@ async def test_stream_errors_emit_error_event_and_persist_error_status(test_clie
     detail = detail_response.json()
     assert detail["messages"][0]["response"] == "Oops"
     assert detail["messages"][0]["status"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_disabled_model_workspace_remains_readable_but_blocks_new_generation(test_client):
+    workspace = await create_workspace(test_client, "Workspace Disabled")
+
+    first_response = await test_client.post(
+        "/api/chat/stream",
+        json={
+            "workspace_id": workspace["workspace_id"],
+            "conversation_id": 0,
+            "message_id": 0,
+            "message": "保留歷史",
+        },
+    )
+    conversation_id = parse_sse_payload(first_response.text)[0][1]["conversation_id"]
+
+    async with db_module.SessionLocal() as session:
+        disabled_model = (
+            await session.execute(select(ModelCatalog).where(ModelCatalog.model_id == "gpt-4.1-classic"))
+        ).scalar_one()
+        current_workspace = (
+            await session.execute(select(Workspace).where(Workspace.workspace_id == workspace["workspace_id"]))
+        ).scalar_one()
+        current_workspace.selected_model_fk = disabled_model.id
+        await session.commit()
+
+    conversations_response = await test_client.get(f"/api/workspaces/{workspace['workspace_id']}/conversations")
+    detail_response = await test_client.get(f"/api/conversations/{conversation_id}")
+    blocked_response = await test_client.post(
+        "/api/chat/stream",
+        json={
+            "workspace_id": workspace["workspace_id"],
+            "conversation_id": conversation_id,
+            "message_id": 0,
+            "message": "新的一句",
+        },
+    )
+
+    assert conversations_response.status_code == 200
+    assert len(conversations_response.json()) == 1
+    assert detail_response.status_code == 200
+    assert detail_response.json()["messages"][0]["query"] == "保留歷史"
+    assert blocked_response.status_code == 409
+    assert blocked_response.json()["detail"] == "Selected Model is disabled for new generation"
 
 
 @pytest.mark.asyncio

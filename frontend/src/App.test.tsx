@@ -6,6 +6,7 @@ import {
   createWorkspace,
   getDefaultWorkspaceModel,
   getConversation,
+  listModels,
   listWorkspaceConversations,
   listWorkspaces,
   openChatStream,
@@ -18,6 +19,7 @@ vi.mock("./api", () => ({
   createWorkspace: vi.fn(),
   getDefaultWorkspaceModel: vi.fn(),
   getConversation: vi.fn(),
+  listModels: vi.fn(),
   listWorkspaceConversations: vi.fn(),
   listWorkspaces: vi.fn(),
   openChatStream: vi.fn(),
@@ -50,6 +52,7 @@ vi.mock("./lib/sse", () => ({
 const mockedCreateWorkspace = vi.mocked(createWorkspace);
 const mockedGetDefaultWorkspaceModel = vi.mocked(getDefaultWorkspaceModel);
 const mockedGetConversation = vi.mocked(getConversation);
+const mockedListModels = vi.mocked(listModels);
 const mockedListWorkspaceConversations = vi.mocked(listWorkspaceConversations);
 const mockedListWorkspaces = vi.mocked(listWorkspaces);
 const mockedOpenChatStream = vi.mocked(openChatStream);
@@ -62,6 +65,7 @@ describe("App", () => {
     mockedCreateWorkspace.mockReset();
     mockedGetDefaultWorkspaceModel.mockReset();
     mockedGetConversation.mockReset();
+    mockedListModels.mockReset();
     mockedListWorkspaceConversations.mockReset();
     mockedListWorkspaces.mockReset();
     mockedOpenChatStream.mockReset();
@@ -69,6 +73,61 @@ describe("App", () => {
     mockedUpdateWorkspace.mockReset();
     mockedReadSseStream.mockReset();
     mockedStopConversation.mockResolvedValue(undefined);
+    mockedListModels.mockResolvedValue([
+      {
+        model_id: "gpt-5.4-mini",
+        label: "GPT 5.4 Mini",
+        is_enabled: true,
+        is_default_workspace_model: true,
+        supports_system_message: true,
+        settings_schema: {
+          temperature: {
+            type: "number",
+            label: "Temperature",
+            min: 0,
+            max: 2,
+            step: 0.1,
+            help_text: "Higher values make replies more exploratory.",
+          },
+          reasoning_effort: {
+            type: "enum",
+            label: "Reasoning effort",
+            options: [
+              { value: "minimal", label: "Minimal" },
+              { value: "medium", label: "Medium" },
+              { value: "high", label: "High" },
+            ],
+            help_text: "Controls how much reasoning budget the model uses.",
+          },
+        },
+        settings_defaults: {
+          temperature: 1,
+          reasoning_effort: "medium",
+        },
+        sort_order: 0,
+      },
+      {
+        model_id: "gpt-5.4-nano",
+        label: "GPT 5.4 Nano",
+        is_enabled: true,
+        is_default_workspace_model: false,
+        supports_system_message: true,
+        settings_schema: {
+          temperature: {
+            type: "number",
+            label: "Temperature",
+            min: 0,
+            max: 2,
+            step: 0.1,
+            help_text: "Higher values make replies more exploratory.",
+          },
+        },
+        settings_defaults: {
+          temperature: 0.7,
+        },
+        sort_order: 1,
+      },
+    ]);
   });
 
   it("loads workspace-scoped conversations and switches between workspaces", async () => {
@@ -84,6 +143,9 @@ describe("App", () => {
           label: "gpt-5.4-nano",
           is_enabled: true,
           is_default_workspace_model: true,
+        },
+        model_settings: {
+          temperature: 0.7,
         },
         created_at: "2026-05-15T00:00:00Z",
         updated_at: "2026-05-15T00:00:00Z",
@@ -228,6 +290,9 @@ describe("App", () => {
           is_enabled: true,
           is_default_workspace_model: true,
         },
+        model_settings: {
+          temperature: 0.7,
+        },
         created_at: "2026-05-15T00:00:00Z",
         updated_at: "2026-05-15T00:00:00Z",
       },
@@ -299,6 +364,9 @@ describe("App", () => {
           is_enabled: true,
           is_default_workspace_model: true,
         },
+        model_settings: {
+          temperature: 0.7,
+        },
         created_at: "2026-05-15T00:00:00Z",
         updated_at: "2026-05-15T00:00:00Z",
       },
@@ -351,6 +419,9 @@ describe("App", () => {
           is_enabled: true,
           is_default_workspace_model: true,
         },
+        model_settings: {
+          temperature: 0.7,
+        },
         created_at: "2026-05-15T00:00:00Z",
         updated_at: "2026-05-15T00:00:00Z",
       },
@@ -365,6 +436,9 @@ describe("App", () => {
         label: "gpt-5.4-nano",
         is_enabled: true,
         is_default_workspace_model: true,
+      },
+      model_settings: {
+        temperature: 0.7,
       },
       created_at: "2026-05-15T00:00:00Z",
       updated_at: "2026-05-15T00:05:00Z",
@@ -391,6 +465,10 @@ describe("App", () => {
     expect(mockedUpdateWorkspace).toHaveBeenCalledWith("ws-settings", {
       name: "Workspace Renamed",
       system_message: "Saved system message",
+      selected_model_id: "gpt-5.4-nano",
+      model_settings: {
+        temperature: 0.7,
+      },
     });
     expect(await screen.findByRole("heading", { name: "Workspace Settings" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Workspace Renamed/ })).toBeInTheDocument();
@@ -449,6 +527,102 @@ describe("App", () => {
     expect(await screen.findByText("開始一段新對話")).toBeInTheDocument();
     expect(screen.getByText("Workspace Beta | gpt-5.4-nano")).toBeInTheDocument();
     confirmSpy.mockRestore();
+  });
+
+  it("renders model settings from the catalog and drops obsolete pending fields on model change", async () => {
+    const user = userEvent.setup();
+
+    mockedListWorkspaces.mockResolvedValue([
+      {
+        workspace_id: "ws-models",
+        name: "Workspace Models",
+        system_message: "Model system message",
+        selected_model: {
+          model_id: "gpt-5.4-mini",
+          label: "GPT 5.4 Mini",
+          is_enabled: true,
+          is_default_workspace_model: true,
+        },
+        model_settings: {
+          temperature: 1,
+          reasoning_effort: "medium",
+        },
+        created_at: "2026-05-15T00:00:00Z",
+        updated_at: "2026-05-15T00:00:00Z",
+      },
+    ]);
+    mockedListWorkspaceConversations.mockResolvedValue([]);
+    mockedUpdateWorkspace.mockResolvedValue({
+      workspace_id: "ws-models",
+      name: "Workspace Models",
+      system_message: "Model system message",
+      selected_model: {
+        model_id: "gpt-5.4-nano",
+        label: "GPT 5.4 Nano",
+        is_enabled: true,
+        is_default_workspace_model: false,
+      },
+      model_settings: {
+        temperature: 0.4,
+      },
+      created_at: "2026-05-15T00:00:00Z",
+      updated_at: "2026-05-15T00:05:00Z",
+    });
+
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "Open workspace settings" }));
+    await user.click(screen.getByRole("tab", { name: "Model" }));
+
+    expect(screen.getByLabelText("Selected Model")).toHaveValue("gpt-5.4-mini");
+    expect(screen.getByLabelText("Temperature")).toHaveValue(1);
+    expect(screen.getByLabelText("Reasoning effort")).toHaveValue("medium");
+
+    await user.clear(screen.getByLabelText("Temperature"));
+    await user.type(screen.getByLabelText("Temperature"), "0.4");
+    await user.selectOptions(screen.getByLabelText("Reasoning effort"), "high");
+    await user.selectOptions(screen.getByLabelText("Selected Model"), "gpt-5.4-nano");
+
+    expect(screen.queryByLabelText("Reasoning effort")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Save settings" }));
+
+    expect(mockedUpdateWorkspace).toHaveBeenCalledWith("ws-models", {
+      name: "Workspace Models",
+      system_message: "Model system message",
+      selected_model_id: "gpt-5.4-nano",
+      model_settings: {
+        temperature: 0.4,
+      },
+    });
+  });
+
+  it("keeps a disabled model workspace readable but blocks new generation", async () => {
+    mockedListWorkspaces.mockResolvedValue([
+      {
+        workspace_id: "ws-disabled",
+        name: "Workspace Disabled",
+        system_message: "Disabled system message",
+        selected_model: {
+          model_id: "gpt-4.1-classic",
+          label: "GPT 4.1 Classic",
+          is_enabled: false,
+          is_default_workspace_model: false,
+        },
+        model_settings: {
+          temperature: 1,
+        },
+        created_at: "2026-05-15T00:00:00Z",
+        updated_at: "2026-05-15T00:00:00Z",
+      },
+    ]);
+    mockedListWorkspaceConversations.mockResolvedValue([]);
+
+    render(<App />);
+
+    expect(await screen.findByText("Selected Model is disabled for new generation. Open Workspace Settings and choose an enabled model.")).toBeInTheDocument();
+    expect(screen.getByLabelText("訊息輸入框")).toBeDisabled();
+    expect(screen.queryByLabelText("Send message")).not.toBeInTheDocument();
   });
 
   it("validates a non-blank system message before save", async () => {

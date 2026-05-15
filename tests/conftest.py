@@ -22,9 +22,16 @@ class FakeChatService:
         self.system_prompt = None
         self.chat_model = None
 
-    def configure_runtime(self, *, system_prompt: str, chat_model: str) -> None:
+    def configure_runtime(
+        self,
+        *,
+        system_prompt: str,
+        chat_model: str,
+        model_settings: dict[str, object],
+    ) -> None:
         self.system_prompt = system_prompt
         self.chat_model = chat_model
+        self.model_settings = model_settings
 
     async def stream_chat(self, messages, user_message):
         yield ChatEvent(state=ChatStreamState.STARTED, response_id="resp_test_1")

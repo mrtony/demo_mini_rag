@@ -5,11 +5,34 @@ export type ModelCatalogSummary = {
   is_default_workspace_model: boolean;
 };
 
+export type ModelSettingOption = {
+  value: string;
+  label: string;
+};
+
+export type ModelSettingSchema = {
+  type: "number" | "enum";
+  label: string;
+  help_text?: string;
+  min?: number;
+  max?: number;
+  step?: number;
+  options?: ModelSettingOption[];
+};
+
+export type ModelCatalogEntry = ModelCatalogSummary & {
+  supports_system_message: boolean;
+  settings_schema: Record<string, ModelSettingSchema>;
+  settings_defaults: Record<string, string | number>;
+  sort_order: number;
+};
+
 export type WorkspaceSummary = {
   workspace_id: string;
   name: string;
   system_message: string;
   selected_model: ModelCatalogSummary;
+  model_settings?: Record<string, string | number>;
   created_at: string;
   updated_at: string;
 };
