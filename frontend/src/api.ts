@@ -3,6 +3,7 @@ import type {
   ChatStreamRequest,
   ConversationDetail,
   ConversationSummary,
+  ModelCatalogSummary,
   StoredMessage,
   WorkspaceSummary,
 } from "./types";
@@ -30,6 +31,11 @@ export async function createWorkspace(name: string): Promise<WorkspaceSummary> {
     body: JSON.stringify({ name }),
   });
   return expectJson<WorkspaceSummary>(response);
+}
+
+export async function getDefaultWorkspaceModel(): Promise<ModelCatalogSummary> {
+  const response = await fetch(`${API_BASE}/api/workspaces/default-model`);
+  return expectJson<ModelCatalogSummary>(response);
 }
 
 export async function listWorkspaceConversations(workspaceId: string): Promise<ConversationSummary[]> {

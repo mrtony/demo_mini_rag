@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import App from "./App";
 import {
   createWorkspace,
+  getDefaultWorkspaceModel,
   getConversation,
   listWorkspaceConversations,
   listWorkspaces,
@@ -14,6 +15,7 @@ import { readSseStream } from "./lib/sse";
 
 vi.mock("./api", () => ({
   createWorkspace: vi.fn(),
+  getDefaultWorkspaceModel: vi.fn(),
   getConversation: vi.fn(),
   listWorkspaceConversations: vi.fn(),
   listWorkspaces: vi.fn(),
@@ -44,6 +46,7 @@ vi.mock("./lib/sse", () => ({
 }));
 
 const mockedCreateWorkspace = vi.mocked(createWorkspace);
+const mockedGetDefaultWorkspaceModel = vi.mocked(getDefaultWorkspaceModel);
 const mockedGetConversation = vi.mocked(getConversation);
 const mockedListWorkspaceConversations = vi.mocked(listWorkspaceConversations);
 const mockedListWorkspaces = vi.mocked(listWorkspaces);
@@ -54,6 +57,7 @@ const mockedReadSseStream = vi.mocked(readSseStream);
 describe("App", () => {
   beforeEach(() => {
     mockedCreateWorkspace.mockReset();
+    mockedGetDefaultWorkspaceModel.mockReset();
     mockedGetConversation.mockReset();
     mockedListWorkspaceConversations.mockReset();
     mockedListWorkspaces.mockReset();
@@ -132,6 +136,12 @@ describe("App", () => {
     let conversationCreated = false;
 
     mockedListWorkspaces.mockResolvedValue([]);
+    mockedGetDefaultWorkspaceModel.mockResolvedValue({
+      model_id: "gpt-5.4-nano",
+      label: "GPT 5.4 Nano",
+      is_enabled: true,
+      is_default_workspace_model: true,
+    });
     mockedListWorkspaceConversations.mockImplementation(async () =>
       conversationCreated
         ? [
@@ -175,6 +185,9 @@ describe("App", () => {
 
     render(<App />);
 
+    expect(await screen.findByText("預設模型")).toBeInTheDocument();
+    expect(screen.getByText("GPT 5.4 Nano")).toBeInTheDocument();
+
     await user.type(screen.getByLabelText("工作區名稱"), "New Workspace");
     await user.click(screen.getByLabelText("建立工作區"));
 
@@ -192,6 +205,7 @@ describe("App", () => {
       },
       expect.any(AbortSignal),
     );
+    expect(mockedGetDefaultWorkspaceModel).toHaveBeenCalledTimes(1);
     expect(await screen.findByRole("button", { name: /第一句話/ })).toBeInTheDocument();
   });
 

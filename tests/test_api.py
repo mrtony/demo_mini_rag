@@ -34,6 +34,21 @@ async def create_workspace(test_client, name: str = "Workspace Alpha") -> dict:
 
 
 @pytest.mark.asyncio
+async def test_reads_default_workspace_model_for_create_flow(test_client):
+    settings = get_settings()
+
+    response = await test_client.get("/api/workspaces/default-model")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "model_id": settings.chat_model,
+        "label": settings.chat_model,
+        "is_enabled": True,
+        "is_default_workspace_model": True,
+    }
+
+
+@pytest.mark.asyncio
 async def test_creates_workspace_with_default_settings_and_rejects_invalid_names(test_client):
     settings = get_settings()
     response = await test_client.post("/api/workspaces", json={"name": "Workspace Alpha"})

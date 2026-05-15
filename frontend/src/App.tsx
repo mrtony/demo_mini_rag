@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import "./App.css";
 import {
   createWorkspace,
+  getDefaultWorkspaceModel,
   getConversation,
   listWorkspaceConversations,
   listWorkspaces,
@@ -13,7 +14,13 @@ import {
 } from "./api";
 import { PlusIcon, SendIcon, StopIcon } from "./components/Icons";
 import { readSseStream } from "./lib/sse";
-import type { ChatBubble, ConversationSummary, ParsedSseEvent, WorkspaceSummary } from "./types";
+import type {
+  ChatBubble,
+  ConversationSummary,
+  ModelCatalogSummary,
+  ParsedSseEvent,
+  WorkspaceSummary,
+} from "./types";
 
 
 const EMPTY_TITLE = "\u65b0\u5c0d\u8a71";
@@ -49,6 +56,7 @@ function sortConversations(conversations: ConversationSummary[]): ConversationSu
 
 export default function App() {
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
+  const [defaultWorkspaceModel, setDefaultWorkspaceModel] = useState<ModelCatalogSummary | null>(null);
   const [conversationSummariesByWorkspaceId, setConversationSummariesByWorkspaceId] = useState<
     Record<string, ConversationSummary[]>
   >({});
@@ -65,6 +73,7 @@ export default function App() {
 
   useEffect(() => {
     void refreshWorkspaces();
+    void refreshDefaultWorkspaceModel();
   }, []);
 
   useEffect(() => {
@@ -89,6 +98,15 @@ export default function App() {
         }
         return data[0]?.workspace_id ?? null;
       });
+    } catch (error) {
+      setErrorMessage(getErrorMessage(error));
+    }
+  }
+
+  async function refreshDefaultWorkspaceModel() {
+    try {
+      const data = await getDefaultWorkspaceModel();
+      setDefaultWorkspaceModel(data);
     } catch (error) {
       setErrorMessage(getErrorMessage(error));
     }
@@ -383,6 +401,10 @@ export default function App() {
             </button>
           </div>
         </form>
+        <div className="workspace-default-model" aria-live="polite">
+          <span>預設模型</span>
+          <strong>{defaultWorkspaceModel?.label ?? "載入中..."}</strong>
+        </div>
 
         <div className="conversation-list">
           {workspaces.map((workspace) => (

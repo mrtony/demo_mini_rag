@@ -206,6 +206,12 @@ async def list_workspaces(session: AsyncSession = Depends(get_db_session)) -> li
     return [_serialize_workspace(item) for item in result.scalars().all()]
 
 
+@router.get("/workspaces/default-model", response_model=ModelCatalogSummary)
+async def get_default_workspace_model(session: AsyncSession = Depends(get_db_session)) -> ModelCatalogSummary:
+    model = await _load_default_workspace_model(session)
+    return _serialize_model(model)
+
+
 @router.post("/workspaces", response_model=WorkspaceSummary, status_code=status.HTTP_201_CREATED)
 async def create_workspace(
     payload: WorkspaceCreateRequest,

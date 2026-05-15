@@ -60,6 +60,25 @@
   overflow: auto;
 }
 
+.workspace-default-model {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 6px;
+  color: #57534e;
+  font-size: 0.88rem;
+}
+
+.workspace-default-model span {
+  color: #78716c;
+}
+
+.workspace-default-model strong {
+  color: #0f766e;
+  font-size: 0.92rem;
+}
+
 .conversation-item {
   width: 100%;
   text-align: left;
