@@ -777,6 +777,156 @@ async def test_deletes_conversation_permanently_and_removes_from_workspace_histo
 
 
 @pytest.mark.asyncio
+async def test_title_generation_fires_independent_of_mid_stream_workspace_model_change(test_client):
+    workspace = await create_workspace(test_client, "Workspace Title Independence")
+
+    class BlockingTitleChatService:
+        first_delta_emitted = asyncio.Event()
+        allow_completion = asyncio.Event()
+        generate_title_calls: list[str] = []
+
+        def configure_runtime(self, *, system_prompt, chat_model, model_settings) -> None:
+            pass
+
+        async def stream_chat(self, messages, user_message):
+            yield ChatEvent(state=ChatStreamState.STARTED, response_id="resp_title_1")
+            yield ChatEvent(state=ChatStreamState.DELTA, delta="Hello", response_id="resp_title_1")
+            self.__class__.first_delta_emitted.set()
+            await self.__class__.allow_completion.wait()
+            yield ChatEvent(state=ChatStreamState.COMPLETED, response_id="resp_title_1")
+
+        async def generate_title(self, first_message: str) -> str:
+            self.__class__.generate_title_calls.append(first_message)
+            return "Title from message"
+
+        async def maybe_close_stream(self, stream) -> None:
+            return None
+
+    app.dependency_overrides[get_chat_service] = BlockingTitleChatService
+    BlockingTitleChatService.generate_title_calls = []
+    BlockingTitleChatService.first_delta_emitted = asyncio.Event()
+    BlockingTitleChatService.allow_completion = asyncio.Event()
+
+    try:
+        response_task = asyncio.create_task(
+            test_client.post(
+                "/api/chat/stream",
+                json={
+                    "workspace_id": workspace["workspace_id"],
+                    "conversation_id": 0,
+                    "message_id": 0,
+                    "message": "標題獨立測試",
+                },
+            )
+        )
+
+        await BlockingTitleChatService.first_delta_emitted.wait()
+
+        update_response = await test_client.put(
+            f"/api/workspaces/{workspace['workspace_id']}",
+            json={
+                "name": "Workspace Title Independence",
+                "system_message": workspace["system_message"],
+                "selected_model_id": "gpt-5.4-nano",
+                "model_settings": {"temperature": 0.3},
+            },
+        )
+        assert update_response.status_code == 200
+
+        BlockingTitleChatService.allow_completion.set()
+        response = await response_task
+
+        assert response.status_code == 200
+        events = parse_sse_payload(response.text)
+        event_names = [name for name, _ in events]
+        title_events = [payload for name, payload in events if name == "conversation.title"]
+
+        assert "conversation.title" in event_names
+        assert len(title_events) == 1
+        assert title_events[0]["conversation_title"] == "Title from message"
+        assert BlockingTitleChatService.generate_title_calls == ["標題獨立測試"]
+    finally:
+        app.dependency_overrides.pop(get_chat_service, None)
+
+
+@pytest.mark.asyncio
+async def test_deletes_conversation_stops_active_stream_before_removal(test_client):
+    workspace = await create_workspace(test_client, "Workspace Stop Delete")
+
+    class BlockingDeleteChatService:
+        first_delta_emitted = asyncio.Event()
+        proceed_after_delete = asyncio.Event()
+
+        def configure_runtime(self, *, system_prompt, chat_model, model_settings) -> None:
+            pass
+
+        async def stream_chat(self, messages, user_message):
+            yield ChatEvent(state=ChatStreamState.STARTED, response_id="resp_del_1")
+            yield ChatEvent(state=ChatStreamState.DELTA, delta="Hello", response_id="resp_del_1")
+            self.__class__.first_delta_emitted.set()
+            await self.__class__.proceed_after_delete.wait()
+            yield ChatEvent(state=ChatStreamState.DELTA, delta=" world", response_id="resp_del_1")
+            yield ChatEvent(state=ChatStreamState.COMPLETED)
+
+        async def generate_title(self, first_message: str) -> str:
+            return "Stop delete title"
+
+        async def maybe_close_stream(self, stream) -> None:
+            return None
+
+    app.dependency_overrides[get_chat_service] = BlockingDeleteChatService
+    BlockingDeleteChatService.first_delta_emitted = asyncio.Event()
+    BlockingDeleteChatService.proceed_after_delete = asyncio.Event()
+
+    try:
+        response_task = asyncio.create_task(
+            test_client.post(
+                "/api/chat/stream",
+                json={
+                    "workspace_id": workspace["workspace_id"],
+                    "conversation_id": 0,
+                    "message_id": 0,
+                    "message": "停止刪除測試",
+                },
+            )
+        )
+
+        await BlockingDeleteChatService.first_delta_emitted.wait()
+
+        conversations_response = await test_client.get(
+            f"/api/workspaces/{workspace['workspace_id']}/conversations"
+        )
+        assert conversations_response.status_code == 200
+        conversations = conversations_response.json()
+        assert len(conversations) == 1
+        conversation_id = conversations[0]["conversation_id"]
+
+        delete_response = await test_client.delete(f"/api/conversations/{conversation_id}")
+        assert delete_response.status_code == 204
+
+        BlockingDeleteChatService.proceed_after_delete.set()
+
+        response = await response_task
+        assert response.status_code == 200
+
+        events = parse_sse_payload(response.text)
+        done_events = [(name, payload) for name, payload in events if name == "message.done"]
+        assert len(done_events) == 1
+        assert done_events[0][1]["status"] == "stopped"
+
+        conversations_after = await test_client.get(
+            f"/api/workspaces/{workspace['workspace_id']}/conversations"
+        )
+        assert conversations_after.status_code == 200
+        assert conversations_after.json() == []
+
+        detail_response = await test_client.get(f"/api/conversations/{conversation_id}")
+        assert detail_response.status_code == 404
+    finally:
+        app.dependency_overrides.pop(get_chat_service, None)
+
+
+@pytest.mark.asyncio
 async def test_get_db_session_ignores_close_errors(monkeypatch):
     from backend.app import db as db_module
 
