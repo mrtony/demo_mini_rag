@@ -19,6 +19,12 @@ class FakeChatService:
     def __init__(self) -> None:
         self.closed = False
         self.title = "Test title"
+        self.system_prompt = None
+        self.chat_model = None
+
+    def configure_runtime(self, *, system_prompt: str, chat_model: str) -> None:
+        self.system_prompt = system_prompt
+        self.chat_model = chat_model
 
     async def stream_chat(self, messages, user_message):
         yield ChatEvent(state=ChatStreamState.STARTED, response_id="resp_test_1")
@@ -40,6 +46,7 @@ class FakeChatService:
 async def test_client(tmp_path) -> AsyncIterator[AsyncClient]:
     from backend.app import db as db_module
     from backend.app import routes as routes_module
+    from backend.app.services.catalog_service import seed_model_catalog
 
     database_path = tmp_path / "test.db"
     engine = create_async_engine(f"sqlite+aiosqlite:///{database_path.as_posix()}", future=True)
@@ -51,6 +58,7 @@ async def test_client(tmp_path) -> AsyncIterator[AsyncClient]:
 
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
+    await seed_model_catalog()
 
     app.dependency_overrides[get_chat_service] = FakeChatService
 

@@ -9,15 +9,23 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from .chat_events import ChatStreamState
 from .config import Settings, get_settings
 from .db import SessionLocal, get_db_session
-from .models import Conversation, Message
-from .schemas import ChatStreamRequest, ConversationDetail, ConversationSummary, StoredMessage
+from .models import Conversation, Message, ModelCatalog, Workspace
+from .schemas import (
+    ChatStreamRequest,
+    ConversationDetail,
+    ConversationSummary,
+    ModelCatalogSummary,
+    StoredMessage,
+    WorkspaceCreateRequest,
+    WorkspaceSummary,
+)
 from .services.chat_service import ChatService
 from .sse import format_sse_event, iter_sse
 
@@ -45,10 +53,54 @@ def _temporary_title(message: str, limit: int) -> str:
     return message.strip().replace("\n", " ")[:limit] or "New chat"
 
 
+def _serialize_model(model: ModelCatalog) -> ModelCatalogSummary:
+    return ModelCatalogSummary(
+        model_id=model.model_id,
+        label=model.label,
+        is_enabled=model.is_enabled,
+        is_default_workspace_model=model.is_default_workspace_model,
+    )
+
+
+def _serialize_workspace(workspace: Workspace) -> WorkspaceSummary:
+    return WorkspaceSummary(
+        workspace_id=workspace.workspace_id,
+        name=workspace.name,
+        system_message=workspace.system_message,
+        selected_model=_serialize_model(workspace.selected_model),
+        created_at=workspace.created_at,
+        updated_at=workspace.updated_at,
+    )
+
+
+def _serialize_conversation_summary(conversation: Conversation) -> ConversationSummary:
+    return ConversationSummary(
+        workspace_id=conversation.workspace.workspace_id,
+        conversation_id=conversation.conversation_id,
+        conversation_title=conversation.conversation_title,
+        updated_at=conversation.updated_at,
+    )
+
+
+async def _load_workspace_or_404(session: AsyncSession, public_id: str) -> Workspace:
+    result = await session.execute(
+        select(Workspace)
+        .options(selectinload(Workspace.selected_model))
+        .where(Workspace.workspace_id == public_id, Workspace.is_archived.is_(False))
+    )
+    workspace = result.scalar_one_or_none()
+    if workspace is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found")
+    return workspace
+
+
 async def _load_conversation_or_404(session: AsyncSession, public_id: str) -> Conversation:
     result = await session.execute(
         select(Conversation)
-        .options(selectinload(Conversation.messages))
+        .options(
+            selectinload(Conversation.messages),
+            selectinload(Conversation.workspace).selectinload(Workspace.selected_model),
+        )
         .where(Conversation.conversation_id == public_id)
     )
     conversation = result.scalar_one_or_none()
@@ -63,6 +115,22 @@ async def _load_conversation_messages(conversation_pk: int) -> list[Message]:
             select(Message).where(Message.conversation_fk == conversation_pk).order_by(Message.id.asc())
         )
         return list(result.scalars().all())
+
+
+async def _load_default_workspace_model(session: AsyncSession) -> ModelCatalog:
+    result = await session.execute(
+        select(ModelCatalog).where(
+            ModelCatalog.is_default_workspace_model.is_(True),
+            ModelCatalog.is_enabled.is_(True),
+        )
+    )
+    model = result.scalar_one_or_none()
+    if model is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Default Workspace Model is not configured",
+        )
+    return model
 
 
 async def _create_message(
@@ -110,8 +178,12 @@ async def _update_conversation_title(conversation_pk: int, title: str) -> Conver
         conversation.conversation_title = title
         conversation.updated_at = _utc_now()
         await session.commit()
-        await session.refresh(conversation)
-        return conversation
+        refreshed = await session.execute(
+            select(Conversation)
+            .options(selectinload(Conversation.workspace))
+            .where(Conversation.id == conversation_pk)
+        )
+        return refreshed.scalar_one_or_none()
 
 
 async def _mark_message_error(message_id: int, response_text: str, status_value: str) -> None:
@@ -123,18 +195,53 @@ async def _run_cleanup(awaitable: Any) -> None:
         await asyncio.shield(awaitable)
 
 
-@router.get("/conversations", response_model=list[ConversationSummary])
-async def list_conversations(session: AsyncSession = Depends(get_db_session)) -> list[ConversationSummary]:
-    result = await session.execute(select(Conversation).order_by(Conversation.updated_at.desc(), Conversation.id.desc()))
-    conversations = result.scalars().all()
-    return [
-        ConversationSummary(
-            conversation_id=item.conversation_id,
-            conversation_title=item.conversation_title,
-            updated_at=item.updated_at,
-        )
-        for item in conversations
-    ]
+@router.get("/workspaces", response_model=list[WorkspaceSummary])
+async def list_workspaces(session: AsyncSession = Depends(get_db_session)) -> list[WorkspaceSummary]:
+    result = await session.execute(
+        select(Workspace)
+        .options(selectinload(Workspace.selected_model))
+        .where(Workspace.is_archived.is_(False))
+        .order_by(Workspace.sort_order.asc(), Workspace.id.asc())
+    )
+    return [_serialize_workspace(item) for item in result.scalars().all()]
+
+
+@router.post("/workspaces", response_model=WorkspaceSummary, status_code=status.HTTP_201_CREATED)
+async def create_workspace(
+    payload: WorkspaceCreateRequest,
+    session: AsyncSession = Depends(get_db_session),
+    settings: Settings = Depends(get_settings),
+) -> WorkspaceSummary:
+    default_model = await _load_default_workspace_model(session)
+    next_sort_order = await session.scalar(select(func.coalesce(func.max(Workspace.sort_order) + 1, 0)))
+    workspace = Workspace(
+        workspace_id=str(uuid4()),
+        name=payload.name,
+        system_message=settings.chat_system_prompt,
+        selected_model_fk=default_model.id,
+        sort_order=next_sort_order or 0,
+        is_archived=False,
+    )
+    session.add(workspace)
+    await session.commit()
+
+    created_workspace = await _load_workspace_or_404(session, workspace.workspace_id)
+    return _serialize_workspace(created_workspace)
+
+
+@router.get("/workspaces/{workspace_id}/conversations", response_model=list[ConversationSummary])
+async def list_workspace_conversations(
+    workspace_id: str,
+    session: AsyncSession = Depends(get_db_session),
+) -> list[ConversationSummary]:
+    workspace = await _load_workspace_or_404(session, workspace_id)
+    result = await session.execute(
+        select(Conversation)
+        .options(selectinload(Conversation.workspace))
+        .where(Conversation.workspace_fk == workspace.id)
+        .order_by(Conversation.updated_at.desc(), Conversation.id.desc())
+    )
+    return [_serialize_conversation_summary(item) for item in result.scalars().all()]
 
 
 @router.get("/conversations/{conversation_id}", response_model=ConversationDetail)
@@ -144,6 +251,7 @@ async def get_conversation(
 ) -> ConversationDetail:
     conversation = await _load_conversation_or_404(session, conversation_id)
     return ConversationDetail(
+        workspace_id=conversation.workspace.workspace_id,
         conversation_id=conversation.conversation_id,
         conversation_title=conversation.conversation_title,
         created_at=conversation.created_at,
@@ -183,14 +291,23 @@ async def stream_chat(
     normalized_conversation_id = _normalize_conversation_id(payload.conversation_id)
     conversation_pk: int
     public_conversation_id: str
+    workspace_id: str
     temp_title: str | None = None
 
     async with SessionLocal() as session:
         if normalized_conversation_id is None:
+            if not payload.workspace_id:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="workspace_id is required for a new Conversation",
+                )
+            workspace = await _load_workspace_or_404(session, payload.workspace_id)
             public_conversation_id = str(uuid4())
+            workspace_id = workspace.workspace_id
             temp_title = _temporary_title(payload.message, settings.title_max_length)
             conversation = Conversation(
                 conversation_id=public_conversation_id,
+                workspace_fk=workspace.id,
                 conversation_title=temp_title,
             )
             session.add(conversation)
@@ -198,11 +315,26 @@ async def stream_chat(
             await session.refresh(conversation)
         else:
             conversation = await _load_conversation_or_404(session, normalized_conversation_id)
+            workspace = conversation.workspace
             public_conversation_id = conversation.conversation_id
+            workspace_id = workspace.workspace_id
+
+        if not workspace.selected_model.is_enabled:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Selected Model is disabled for new generation",
+            )
+
+        chat_service.configure_runtime(
+            system_prompt=workspace.system_message,
+            chat_model=workspace.selected_model.model_id,
+        )
+
         conversation_pk = conversation.id
 
     logger.info(
-        "Stream requested for conversation %s (new=%s, message_length=%s)",
+        "Stream requested for workspace %s conversation %s (new=%s, message_length=%s)",
+        workspace_id,
         public_conversation_id,
         normalized_conversation_id is None,
         len(payload.message),
@@ -223,6 +355,7 @@ async def stream_chat(
             yield format_sse_event(
                 "conversation.created",
                 {
+                    "workspace_id": workspace_id,
                     "conversation_id": public_conversation_id,
                     "conversation_title": temp_title,
                 },
@@ -245,6 +378,7 @@ async def stream_chat(
             return format_sse_event(
                 "conversation.title",
                 {
+                    "workspace_id": conversation.workspace.workspace_id,
                     "conversation_id": conversation.conversation_id,
                     "conversation_title": conversation.conversation_title,
                     "updated_at": conversation.updated_at.isoformat(),

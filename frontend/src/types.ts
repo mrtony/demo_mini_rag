@@ -1,4 +1,21 @@
+export type ModelCatalogSummary = {
+  model_id: string;
+  label: string;
+  is_enabled: boolean;
+  is_default_workspace_model: boolean;
+};
+
+export type WorkspaceSummary = {
+  workspace_id: string;
+  name: string;
+  system_message: string;
+  selected_model: ModelCatalogSummary;
+  created_at: string;
+  updated_at: string;
+};
+
 export type ConversationSummary = {
+  workspace_id: string;
   conversation_id: string;
   conversation_title: string;
   updated_at: string;
@@ -14,6 +31,7 @@ export type StoredMessage = {
 };
 
 export type ConversationDetail = {
+  workspace_id: string;
   conversation_id: string;
   conversation_title: string;
   created_at: string;
@@ -30,6 +48,7 @@ export type ChatBubble = {
 };
 
 export type ChatStreamRequest = {
+  workspace_id: string;
   conversation_id: string | number;
   message_id: number;
   message: string;

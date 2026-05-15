@@ -3,7 +3,7 @@ import time
 from collections.abc import AsyncIterator
 from contextlib import suppress
 
-from sqlalchemy import event
+from sqlalchemy import event, inspect
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -93,9 +93,23 @@ async def get_db_session() -> AsyncIterator[AsyncSession]:
             await session.close()
 
 
+def _requires_schema_reset(sync_connection) -> bool:
+    inspector = inspect(sync_connection)
+    table_names = set(inspector.get_table_names())
+    if "conversations" not in table_names:
+        return False
+    conversation_columns = {column["name"] for column in inspector.get_columns("conversations")}
+    return "workspace_fk" not in conversation_columns
+
+
 async def init_db() -> None:
     from . import models  # noqa: F401
+    from .services.catalog_service import seed_model_catalog
 
     async with engine.begin() as connection:
+        if await connection.run_sync(_requires_schema_reset):
+            logger.warning("Legacy database schema detected; rebuilding current tables")
+            await connection.run_sync(Base.metadata.drop_all)
         await connection.run_sync(Base.metadata.create_all)
+    await seed_model_catalog()
     logger.info("Database initialized")

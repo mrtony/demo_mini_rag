@@ -2,10 +2,18 @@ import type { FormEvent } from "react";
 import { useEffect, useRef, useState } from "react";
 
 import "./App.css";
-import { getConversation, listConversations, openChatStream, stopConversation, toChatBubbles } from "./api";
+import {
+  createWorkspace,
+  getConversation,
+  listWorkspaceConversations,
+  listWorkspaces,
+  openChatStream,
+  stopConversation,
+  toChatBubbles,
+} from "./api";
 import { PlusIcon, SendIcon, StopIcon } from "./components/Icons";
 import { readSseStream } from "./lib/sse";
-import type { ChatBubble, ConversationSummary, ParsedSseEvent } from "./types";
+import type { ChatBubble, ConversationSummary, ParsedSseEvent, WorkspaceSummary } from "./types";
 
 
 const EMPTY_TITLE = "\u65b0\u5c0d\u8a71";
@@ -32,11 +40,23 @@ function formatTime(value: string): string {
 }
 
 
+function sortConversations(conversations: ConversationSummary[]): ConversationSummary[] {
+  return [...conversations].sort(
+    (left, right) => new Date(right.updated_at).getTime() - new Date(left.updated_at).getTime(),
+  );
+}
+
+
 export default function App() {
-  const [conversations, setConversations] = useState<ConversationSummary[]>([]);
+  const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
+  const [conversationSummariesByWorkspaceId, setConversationSummariesByWorkspaceId] = useState<
+    Record<string, ConversationSummary[]>
+  >({});
+  const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | null>(null);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatBubble[]>([]);
   const [draft, setDraft] = useState("");
+  const [newWorkspaceName, setNewWorkspaceName] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -44,13 +64,50 @@ export default function App() {
   const stopRequestedBubbleRef = useRef<string | null>(null);
 
   useEffect(() => {
-    void refreshConversations();
+    void refreshWorkspaces();
   }, []);
 
-  async function refreshConversations() {
+  useEffect(() => {
+    if (activeWorkspaceId === null) {
+      setActiveConversationId(null);
+      setMessages([]);
+      return;
+    }
+    void refreshWorkspaceConversations(activeWorkspaceId);
+  }, [activeWorkspaceId]);
+
+  async function refreshWorkspaces(preferredWorkspaceId?: string) {
     try {
-      const data = await listConversations();
-      setConversations(data);
+      const data = await listWorkspaces();
+      setWorkspaces(data);
+      setActiveWorkspaceId((current) => {
+        if (preferredWorkspaceId && data.some((item) => item.workspace_id === preferredWorkspaceId)) {
+          return preferredWorkspaceId;
+        }
+        if (current && data.some((item) => item.workspace_id === current)) {
+          return current;
+        }
+        return data[0]?.workspace_id ?? null;
+      });
+    } catch (error) {
+      setErrorMessage(getErrorMessage(error));
+    }
+  }
+
+  async function refreshWorkspaceConversations(workspaceId: string) {
+    try {
+      const data = await listWorkspaceConversations(workspaceId);
+      setConversationSummariesByWorkspaceId((current) => ({
+        ...current,
+        [workspaceId]: data,
+      }));
+      setActiveConversationId((currentConversationId) => {
+        if (currentConversationId && data.some((item) => item.conversation_id === currentConversationId)) {
+          return currentConversationId;
+        }
+        setMessages([]);
+        return null;
+      });
     } catch (error) {
       setErrorMessage(getErrorMessage(error));
     }
@@ -60,6 +117,7 @@ export default function App() {
     try {
       setErrorMessage(null);
       const detail = await getConversation(conversationId);
+      setActiveWorkspaceId(detail.workspace_id);
       setActiveConversationId(detail.conversation_id);
       setMessages(toChatBubbles(detail.messages));
     } catch (error) {
@@ -67,8 +125,33 @@ export default function App() {
     }
   }
 
+  async function handleCreateWorkspace(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const trimmed = newWorkspaceName.trim();
+    if (!trimmed) {
+      return;
+    }
+
+    try {
+      setErrorMessage(null);
+      const createdWorkspace = await createWorkspace(trimmed);
+      setWorkspaces((current) => [...current, createdWorkspace]);
+      setConversationSummariesByWorkspaceId((current) => ({
+        ...current,
+        [createdWorkspace.workspace_id]: [],
+      }));
+      setActiveWorkspaceId(createdWorkspace.workspace_id);
+      setActiveConversationId(null);
+      setMessages([]);
+      setDraft("");
+      setNewWorkspaceName("");
+    } catch (error) {
+      setErrorMessage(getErrorMessage(error));
+    }
+  }
+
   function startNewConversation() {
-    if (isStreaming) {
+    if (isStreaming || activeWorkspaceId === null) {
       return;
     }
     setActiveConversationId(null);
@@ -77,18 +160,31 @@ export default function App() {
     setErrorMessage(null);
   }
 
-  function upsertConversation(conversation: ConversationSummary) {
-    setConversations((current) => {
-      const next = [...current];
+  function selectWorkspace(workspaceId: string) {
+    if (workspaceId === activeWorkspaceId) {
+      return;
+    }
+    setActiveWorkspaceId(workspaceId);
+    setActiveConversationId(null);
+    setMessages([]);
+    setDraft("");
+    setErrorMessage(null);
+  }
+
+  function upsertConversation(workspaceId: string, conversation: ConversationSummary) {
+    setConversationSummariesByWorkspaceId((current) => {
+      const existing = current[workspaceId] ?? [];
+      const next = [...existing];
       const existingIndex = next.findIndex((item) => item.conversation_id === conversation.conversation_id);
       if (existingIndex >= 0) {
         next[existingIndex] = conversation;
       } else {
         next.unshift(conversation);
       }
-      return next.sort(
-        (left, right) => new Date(right.updated_at).getTime() - new Date(left.updated_at).getTime(),
-      );
+      return {
+        ...current,
+        [workspaceId]: sortConversations(next),
+      };
     });
   }
 
@@ -103,11 +199,14 @@ export default function App() {
     const targetBubbleId = activeAssistantBubbleRef.current;
 
     if (event.event === "conversation.created") {
+      const workspaceId = String(event.data.workspace_id);
       const conversationId = String(event.data.conversation_id);
       const title = String(event.data.conversation_title ?? EMPTY_TITLE);
       const now = new Date().toISOString();
+      setActiveWorkspaceId(workspaceId);
       setActiveConversationId(conversationId);
-      upsertConversation({
+      upsertConversation(workspaceId, {
+        workspace_id: workspaceId,
         conversation_id: conversationId,
         conversation_title: title,
         updated_at: now,
@@ -116,10 +215,12 @@ export default function App() {
     }
 
     if (event.event === "conversation.title") {
+      const workspaceId = String(event.data.workspace_id);
       const conversationId = String(event.data.conversation_id);
       const title = String(event.data.conversation_title ?? EMPTY_TITLE);
       const updatedAt = String(event.data.updated_at ?? new Date().toISOString());
-      upsertConversation({
+      upsertConversation(workspaceId, {
+        workspace_id: workspaceId,
         conversation_id: conversationId,
         conversation_title: title,
         updated_at: updatedAt,
@@ -174,7 +275,7 @@ export default function App() {
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const trimmed = draft.trim();
-    if (!trimmed || isStreaming) {
+    if (!trimmed || isStreaming || activeWorkspaceId === null) {
       return;
     }
 
@@ -194,6 +295,7 @@ export default function App() {
     try {
       const response = await openChatStream(
         {
+          workspace_id: activeWorkspaceId,
           conversation_id: activeConversationId ?? 0,
           message_id: 0,
           message: trimmed,
@@ -225,7 +327,9 @@ export default function App() {
       setIsStreaming(false);
       activeAssistantBubbleRef.current = null;
       stopRequestedBubbleRef.current = null;
-      void refreshConversations();
+      if (activeWorkspaceId !== null) {
+        void refreshWorkspaceConversations(activeWorkspaceId);
+      }
     }
   }
 
@@ -249,8 +353,11 @@ export default function App() {
     abortRef.current?.abort();
   }
 
+  const activeWorkspace = workspaces.find((item) => item.workspace_id === activeWorkspaceId) ?? null;
+  const visibleConversations = activeWorkspaceId ? conversationSummariesByWorkspaceId[activeWorkspaceId] ?? [] : [];
   const activeTitle =
-    conversations.find((item) => item.conversation_id === activeConversationId)?.conversation_title ?? EMPTY_TITLE;
+    visibleConversations.find((item) => item.conversation_id === activeConversationId)?.conversation_title ??
+    EMPTY_TITLE;
   const showSendButton = !isStreaming && draft.trim().length > 0;
 
   return (
@@ -258,8 +365,45 @@ export default function App() {
       <aside className="sidebar">
         <div className="sidebar-header">
           <div>
-            <h1 className="sidebar-title">{"\u5c0d\u8a71\u5217\u8868"}</h1>
-            <p className="sidebar-subtitle">Minimal ChatGPT UI</p>
+            <h1 className="sidebar-title">{"\u5de5\u4f5c\u5340"}</h1>
+            <p className="sidebar-subtitle">Workspace-owned chat</p>
+          </div>
+        </div>
+
+        <form className="composer-form" onSubmit={handleCreateWorkspace}>
+          <textarea
+            value={newWorkspaceName}
+            onChange={(nextEvent) => setNewWorkspaceName(nextEvent.target.value)}
+            placeholder={"\u8f38\u5165\u5de5\u4f5c\u5340\u540d\u7a31"}
+            aria-label={"\u5de5\u4f5c\u5340\u540d\u7a31"}
+          />
+          <div className="composer-actions">
+            <button type="submit" className="icon-button" aria-label={"\u5efa\u7acb\u5de5\u4f5c\u5340"}>
+              <PlusIcon />
+            </button>
+          </div>
+        </form>
+
+        <div className="conversation-list">
+          {workspaces.map((workspace) => (
+            <button
+              key={workspace.workspace_id}
+              type="button"
+              className={`conversation-item${workspace.workspace_id === activeWorkspaceId ? " active" : ""}`}
+              onClick={() => selectWorkspace(workspace.workspace_id)}
+            >
+              <strong>{workspace.name}</strong>
+              <span>{workspace.selected_model.label}</span>
+            </button>
+          ))}
+        </div>
+
+        <div className="sidebar-header">
+          <div>
+            <h2 className="sidebar-title">{"\u5c0d\u8a71"}</h2>
+            <p className="sidebar-subtitle">
+              {activeWorkspace ? activeWorkspace.name : "\u5148\u5efa\u7acb\u6216\u9078\u64c7\u5de5\u4f5c\u5340"}
+            </p>
           </div>
           <button
             type="button"
@@ -267,13 +411,14 @@ export default function App() {
             onClick={startNewConversation}
             aria-label={"\u65b0\u589e\u5c0d\u8a71"}
             title={"\u65b0\u589e\u5c0d\u8a71"}
+            disabled={activeWorkspaceId === null || isStreaming}
           >
             <PlusIcon />
           </button>
         </div>
 
         <div className="conversation-list">
-          {conversations.map((conversation) => (
+          {visibleConversations.map((conversation) => (
             <button
               key={conversation.conversation_id}
               type="button"
@@ -292,7 +437,11 @@ export default function App() {
       <main className="chat-panel">
         <div className="chat-header">
           <h2>{activeTitle}</h2>
-          <p>FastAPI streaming, SQLite history, and React live rendering.</p>
+          <p>
+            {activeWorkspace
+              ? `${activeWorkspace.name} | ${activeWorkspace.selected_model.label}`
+              : "Create a Workspace before starting a Conversation."}
+          </p>
         </div>
 
         {errorMessage ? <div className="error-banner">{errorMessage}</div> : null}
@@ -300,11 +449,15 @@ export default function App() {
         <section className="messages">
           {messages.length === 0 ? (
             <div className="empty-state">
-              <h3>{"\u958b\u59cb\u4e00\u6bb5\u65b0\u5c0d\u8a71"}</h3>
+              <h3>
+                {activeWorkspace
+                  ? "\u958b\u59cb\u4e00\u6bb5\u65b0\u5c0d\u8a71"
+                  : "\u5148\u5efa\u7acb\u5de5\u4f5c\u5340"}
+              </h3>
               <p>
-                {
-                  "\u5de6\u5074\u53ef\u5207\u63db\u820a\u5c0d\u8a71\uff0c\u53f3\u4e0b\u89d2\u8f38\u5165\u7b2c\u4e00\u53e5\u8a0a\u606f\u5f8c\u5c31\u6703\u5efa\u7acb conversation\u3002"
-                }
+                {activeWorkspace
+                  ? "\u7b2c\u4e00\u53e5 User Prompt \u9001\u51fa\u5f8c\u624d\u6703\u5728\u9019\u500b Workspace \u5efa\u7acb Conversation\u3002"
+                  : "\u5de6\u5074\u8f38\u5165 Workspace Name \u4e26\u5efa\u7acb\uff0c\u518d\u958b\u59cb\u5c0d\u8a71\u3002"}
               </p>
             </div>
           ) : (
@@ -329,8 +482,11 @@ export default function App() {
             <textarea
               value={draft}
               onChange={(nextEvent) => setDraft(nextEvent.target.value)}
-              placeholder={"\u8f38\u5165\u8a0a\u606f..."}
+              placeholder={
+                activeWorkspace ? "\u8f38\u5165\u8a0a\u606f..." : "\u5148\u5efa\u7acb\u6216\u9078\u64c7\u5de5\u4f5c\u5340"
+              }
               aria-label={"\u8a0a\u606f\u8f38\u5165\u6846"}
+              disabled={activeWorkspaceId === null}
             />
 
             <div className="composer-actions">

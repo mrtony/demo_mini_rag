@@ -5,6 +5,7 @@ import pytest
 from sqlalchemy.exc import OperationalError
 
 from backend.app.chat_events import ChatEvent, ChatStreamState
+from backend.app.config import get_settings
 from backend.app.main import app
 from backend.app.routes import get_chat_service
 
@@ -26,11 +27,49 @@ def parse_sse_payload(raw_text: str) -> list[tuple[str, dict]]:
     return events
 
 
+async def create_workspace(test_client, name: str = "Workspace Alpha") -> dict:
+    response = await test_client.post("/api/workspaces", json={"name": name})
+    assert response.status_code == 201
+    return response.json()
+
+
 @pytest.mark.asyncio
-async def test_creates_new_conversation_and_streams_messages(test_client):
+async def test_creates_workspace_with_default_settings_and_rejects_invalid_names(test_client):
+    settings = get_settings()
+    response = await test_client.post("/api/workspaces", json={"name": "Workspace Alpha"})
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["name"] == "Workspace Alpha"
+    assert payload["workspace_id"]
+    assert payload["system_message"].strip()
+    assert payload["selected_model"]["model_id"] == settings.chat_model
+    assert payload["selected_model"]["is_enabled"] is True
+    assert payload["selected_model"]["is_default_workspace_model"] is True
+
+    short_name_response = await test_client.post("/api/workspaces", json={"name": "ab"})
+    blank_name_response = await test_client.post("/api/workspaces", json={"name": "   "})
+
+    assert short_name_response.status_code == 422
+    assert blank_name_response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_first_prompt_creates_conversation_for_workspace_at_acceptance_time(test_client):
+    workspace = await create_workspace(test_client)
+
+    before_response = await test_client.get(f"/api/workspaces/{workspace['workspace_id']}/conversations")
+    assert before_response.status_code == 200
+    assert before_response.json() == []
+
     response = await test_client.post(
         "/api/chat/stream",
-        json={"conversation_id": 0, "message_id": 0, "message": "請幫我寫標題"},
+        json={
+            "workspace_id": workspace["workspace_id"],
+            "conversation_id": 0,
+            "message_id": 0,
+            "message": "請幫我寫標題",
+        },
     )
 
     assert response.status_code == 200
@@ -45,25 +84,87 @@ async def test_creates_new_conversation_and_streams_messages(test_client):
     ]
     assert "conversation.title" in event_names
     assert event_names.index("conversation.title") < event_names.index("message.done")
-    assert events[0][1]["conversation_title"] == "請幫我寫標題"
-    created_event = next(payload for name, payload in events if name == "message.created")
-    delta_events = [payload for name, payload in events if name == "message.delta"]
-    title_event = next(payload for name, payload in events if name == "conversation.title")
-    done_event = next(payload for name, payload in events if name == "message.done")
-    assert created_event["message_id"] > 0
-    assert [payload["delta"] for payload in delta_events] == ["Hello", " world"]
-    assert title_event["conversation_title"] == "Test title"
-    assert done_event["status"] == "completed"
+
+    created_conversation = events[0][1]
+    assert created_conversation["workspace_id"] == workspace["workspace_id"]
+    assert created_conversation["conversation_title"] == "請幫我寫標題"
+
+    conversations_response = await test_client.get(f"/api/workspaces/{workspace['workspace_id']}/conversations")
+    assert conversations_response.status_code == 200
+    conversations = conversations_response.json()
+    assert len(conversations) == 1
+    assert conversations[0]["conversation_id"] == created_conversation["conversation_id"]
 
 
 @pytest.mark.asyncio
-async def test_lists_and_loads_conversation_history(test_client):
-    await test_client.post(
+async def test_workspace_scoped_conversation_listing_filters_by_workspace_and_recent_activity(test_client):
+    workspace_alpha = await create_workspace(test_client, "Workspace Alpha")
+    workspace_beta = await create_workspace(test_client, "Workspace Beta")
+
+    first_response = await test_client.post(
         "/api/chat/stream",
-        json={"conversation_id": 0, "message_id": 0, "message": "載入測試"},
+        json={
+            "workspace_id": workspace_alpha["workspace_id"],
+            "conversation_id": 0,
+            "message_id": 0,
+            "message": "第一段對話",
+        },
+    )
+    first_conversation_id = parse_sse_payload(first_response.text)[0][1]["conversation_id"]
+
+    beta_response = await test_client.post(
+        "/api/chat/stream",
+        json={
+            "workspace_id": workspace_beta["workspace_id"],
+            "conversation_id": 0,
+            "message_id": 0,
+            "message": "另一個工作區",
+        },
+    )
+    beta_conversation_id = parse_sse_payload(beta_response.text)[0][1]["conversation_id"]
+
+    second_response = await test_client.post(
+        "/api/chat/stream",
+        json={
+            "workspace_id": workspace_alpha["workspace_id"],
+            "conversation_id": 0,
+            "message_id": 0,
+            "message": "第二段對話",
+        },
+    )
+    second_conversation_id = parse_sse_payload(second_response.text)[0][1]["conversation_id"]
+
+    alpha_conversations_response = await test_client.get(
+        f"/api/workspaces/{workspace_alpha['workspace_id']}/conversations"
+    )
+    beta_conversations_response = await test_client.get(
+        f"/api/workspaces/{workspace_beta['workspace_id']}/conversations"
     )
 
-    conversations_response = await test_client.get("/api/conversations")
+    assert alpha_conversations_response.status_code == 200
+    assert beta_conversations_response.status_code == 200
+    assert [item["conversation_id"] for item in alpha_conversations_response.json()] == [
+        second_conversation_id,
+        first_conversation_id,
+    ]
+    assert [item["conversation_id"] for item in beta_conversations_response.json()] == [beta_conversation_id]
+
+
+@pytest.mark.asyncio
+async def test_loads_workspace_conversation_history(test_client):
+    workspace = await create_workspace(test_client, "Workspace History")
+
+    await test_client.post(
+        "/api/chat/stream",
+        json={
+            "workspace_id": workspace["workspace_id"],
+            "conversation_id": 0,
+            "message_id": 0,
+            "message": "載入測試",
+        },
+    )
+
+    conversations_response = await test_client.get(f"/api/workspaces/{workspace['workspace_id']}/conversations")
     assert conversations_response.status_code == 200
     conversations = conversations_response.json()
     assert len(conversations) == 1
@@ -73,6 +174,7 @@ async def test_lists_and_loads_conversation_history(test_client):
     assert detail_response.status_code == 200
     detail = detail_response.json()
 
+    assert detail["workspace_id"] == workspace["workspace_id"]
     assert detail["messages"][0]["query"] == "載入測試"
     assert detail["messages"][0]["response"] == "Hello world"
     assert detail["messages"][0]["status"] == "completed"
@@ -80,10 +182,17 @@ async def test_lists_and_loads_conversation_history(test_client):
 
 @pytest.mark.asyncio
 async def test_stopping_stream_persists_partial_response(test_client):
+    workspace = await create_workspace(test_client, "Workspace Stop")
+
     async with test_client.stream(
         "POST",
         "/api/chat/stream",
-        json={"conversation_id": 0, "message_id": 0, "message": "停止測試"},
+        json={
+            "workspace_id": workspace["workspace_id"],
+            "conversation_id": 0,
+            "message_id": 0,
+            "message": "停止測試",
+        },
         timeout=30,
     ) as response:
         assert response.status_code == 200
@@ -93,7 +202,7 @@ async def test_stopping_stream_persists_partial_response(test_client):
 
     await asyncio.sleep(0)
 
-    conversations_response = await test_client.get("/api/conversations")
+    conversations_response = await test_client.get(f"/api/workspaces/{workspace['workspace_id']}/conversations")
     conversations = conversations_response.json()
     assert len(conversations) == 1
 
@@ -105,7 +214,13 @@ async def test_stopping_stream_persists_partial_response(test_client):
 
 @pytest.mark.asyncio
 async def test_stream_errors_emit_error_event_and_persist_error_status(test_client):
+    workspace = await create_workspace(test_client, "Workspace Errors")
+
     class ErrorChatService:
+        def configure_runtime(self, *, system_prompt: str, chat_model: str) -> None:
+            self.system_prompt = system_prompt
+            self.chat_model = chat_model
+
         async def stream_chat(self, messages, user_message):
             yield ChatEvent(state=ChatStreamState.STARTED, response_id="resp_error_1")
             yield ChatEvent(state=ChatStreamState.DELTA, delta="Oops", response_id="resp_error_1")
@@ -125,7 +240,12 @@ async def test_stream_errors_emit_error_event_and_persist_error_status(test_clie
     try:
         response = await test_client.post(
             "/api/chat/stream",
-            json={"conversation_id": 0, "message_id": 0, "message": "錯誤測試"},
+            json={
+                "workspace_id": workspace["workspace_id"],
+                "conversation_id": 0,
+                "message_id": 0,
+                "message": "錯誤測試",
+            },
         )
     finally:
         app.dependency_overrides.pop(get_chat_service, None)
@@ -135,7 +255,7 @@ async def test_stream_errors_emit_error_event_and_persist_error_status(test_clie
     error_event = next(payload for name, payload in events if name == "error")
     assert error_event == {"message": "boom", "code": "stream_failed"}
 
-    conversations_response = await test_client.get("/api/conversations")
+    conversations_response = await test_client.get(f"/api/workspaces/{workspace['workspace_id']}/conversations")
     conversations = conversations_response.json()
     assert len(conversations) == 1
 

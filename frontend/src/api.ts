@@ -4,6 +4,7 @@ import type {
   ConversationDetail,
   ConversationSummary,
   StoredMessage,
+  WorkspaceSummary,
 } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "";
@@ -15,8 +16,24 @@ async function expectJson<T>(response: Response): Promise<T> {
   return (await response.json()) as T;
 }
 
-export async function listConversations(): Promise<ConversationSummary[]> {
-  const response = await fetch(`${API_BASE}/api/conversations`);
+export async function listWorkspaces(): Promise<WorkspaceSummary[]> {
+  const response = await fetch(`${API_BASE}/api/workspaces`);
+  return expectJson<WorkspaceSummary[]>(response);
+}
+
+export async function createWorkspace(name: string): Promise<WorkspaceSummary> {
+  const response = await fetch(`${API_BASE}/api/workspaces`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ name }),
+  });
+  return expectJson<WorkspaceSummary>(response);
+}
+
+export async function listWorkspaceConversations(workspaceId: string): Promise<ConversationSummary[]> {
+  const response = await fetch(`${API_BASE}/api/workspaces/${workspaceId}/conversations`);
   return expectJson<ConversationSummary[]>(response);
 }
 

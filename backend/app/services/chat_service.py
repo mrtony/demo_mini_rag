@@ -20,6 +20,13 @@ class ChatService:
         self._chat_model: Any | None = None
         self._title_model: Any | None = None
         self._prompt_builder = PromptBuilder(self.settings.chat_system_prompt)
+        self._runtime_chat_model: str | None = None
+
+    def configure_runtime(self, *, system_prompt: str, chat_model: str) -> None:
+        self._prompt_builder = PromptBuilder(system_prompt)
+        if self._runtime_chat_model != chat_model:
+            self._chat_model = None
+            self._runtime_chat_model = chat_model
 
     def _get_chat_model(self) -> Any:
         if self._chat_model is None:
@@ -27,7 +34,7 @@ class ChatService:
 
             self._chat_model = ChatOpenAI(
                 api_key=self.settings.openai_api_key,
-                model=self.settings.chat_model,
+                model=self._runtime_chat_model or self.settings.chat_model,
             )
         return self._chat_model
 
