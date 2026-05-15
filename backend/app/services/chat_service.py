@@ -20,14 +20,37 @@ class ChatService:
         self._chat_model: Any | None = None
         self._title_model: Any | None = None
         self._prompt_builder = PromptBuilder(self.settings.chat_system_prompt)
+        self._runtime_chat_model: str | None = None
+        self._runtime_model_settings: dict[str, Any] = {}
+
+    def configure_runtime(
+        self,
+        *,
+        system_prompt: str,
+        chat_model: str,
+        model_settings: dict[str, Any],
+    ) -> None:
+        self._prompt_builder = PromptBuilder(system_prompt)
+        if self._runtime_chat_model != chat_model or self._runtime_model_settings != model_settings:
+            self._chat_model = None
+            self._runtime_chat_model = chat_model
+            self._runtime_model_settings = dict(model_settings)
 
     def _get_chat_model(self) -> Any:
         if self._chat_model is None:
             from langchain_openai import ChatOpenAI
 
+            model_kwargs: dict[str, Any] = {
+                "api_key": self.settings.openai_api_key,
+                "model": self._runtime_chat_model or self.settings.chat_model,
+            }
+            if "temperature" in self._runtime_model_settings:
+                model_kwargs["temperature"] = self._runtime_model_settings["temperature"]
+            if "reasoning_effort" in self._runtime_model_settings:
+                model_kwargs["reasoning_effort"] = self._runtime_model_settings["reasoning_effort"]
+
             self._chat_model = ChatOpenAI(
-                api_key=self.settings.openai_api_key,
-                model=self.settings.chat_model,
+                **model_kwargs,
             )
         return self._chat_model
 

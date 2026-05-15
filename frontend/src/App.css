@@ -60,6 +60,31 @@
   overflow: auto;
 }
 
+.sidebar-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.workspace-default-model {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 6px;
+  color: #57534e;
+  font-size: 0.88rem;
+}
+
+.workspace-default-model span {
+  color: #78716c;
+}
+
+.workspace-default-model strong {
+  color: #0f766e;
+  font-size: 0.92rem;
+}
+
 .conversation-item {
   width: 100%;
   text-align: left;
@@ -69,6 +94,49 @@
   background: rgba(255, 255, 255, 0.76);
   cursor: pointer;
   transition: transform 120ms ease, box-shadow 120ms ease, background 120ms ease;
+}
+
+.workspace-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.workspace-row.archived {
+  align-items: center;
+}
+
+.workspace-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.workspace-action-button {
+  border: 1px solid rgba(203, 213, 225, 0.9);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.88);
+  color: #475569;
+  padding: 8px 10px;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.workspace-action-button.warn {
+  color: #9a3412;
+}
+
+.workspace-action-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.conversation-item.archived {
+  cursor: default;
+  background: rgba(248, 250, 252, 0.92);
+  box-shadow: none;
+  transform: none;
 }
 
 .conversation-item:hover,
@@ -83,11 +151,36 @@
   color: #1f2937;
 }
 
+.conversation-item-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.conversation-activity-badge {
+  flex-shrink: 0;
+  border-radius: 999px;
+  padding: 3px 8px;
+  background: rgba(15, 118, 110, 0.12);
+  color: #0f766e;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
 .conversation-item span {
   display: block;
   margin-top: 6px;
   color: #78716c;
   font-size: 0.82rem;
+}
+
+.sidebar-empty {
+  padding: 14px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.68);
+  color: #78716c;
+  font-size: 0.86rem;
 }
 
 .chat-panel {
@@ -99,6 +192,13 @@
 
 .chat-header {
   padding: 22px 26px 0;
+}
+
+.chat-header-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
 }
 
 .chat-header h2 {
@@ -175,6 +275,82 @@
   color: #78716c;
 }
 
+.settings-panel {
+  padding-top: 10px;
+}
+
+.settings-card {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 24px;
+  border-radius: 28px;
+  background: rgba(255, 255, 255, 0.88);
+  border: 1px solid rgba(226, 232, 240, 0.9);
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.settings-tabs {
+  display: flex;
+  gap: 10px;
+}
+
+.settings-tab {
+  border: none;
+  border-radius: 999px;
+  padding: 10px 16px;
+  background: rgba(249, 115, 22, 0.12);
+  color: #9a3412;
+  font-weight: 600;
+}
+
+.settings-tab.active {
+  background: linear-gradient(135deg, #fed7aa, #fdba74);
+}
+
+.settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.settings-field label {
+  font-size: 0.92rem;
+  color: #57534e;
+}
+
+.settings-field input,
+.settings-field textarea {
+  width: 100%;
+  border-radius: 18px;
+  border: 1px solid rgba(203, 213, 225, 0.9);
+  background: rgba(255, 255, 255, 0.96);
+  padding: 14px 16px;
+  outline: none;
+}
+
+.settings-field textarea {
+  min-height: 180px;
+  resize: vertical;
+}
+
+.settings-field input:focus,
+.settings-field textarea:focus {
+  border-color: rgba(249, 115, 22, 0.55);
+  box-shadow: 0 0 0 4px rgba(251, 146, 60, 0.12);
+}
+
+.field-error {
+  color: #b91c1c;
+  font-size: 0.82rem;
+}
+
+.settings-hint {
+  color: #78716c;
+  font-size: 0.9rem;
+}
+
 .composer {
   padding: 18px;
   border-top: 1px solid rgba(226, 232, 240, 0.9);
@@ -230,6 +406,46 @@
 .new-chat-button svg {
   width: 22px;
   height: 22px;
+}
+
+.settings-actions {
+  padding-top: 12px;
+}
+
+.settings-actions-row {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.secondary-button,
+.primary-button {
+  border: none;
+  border-radius: 16px;
+  padding: 12px 18px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.secondary-button {
+  background: rgba(255, 255, 255, 0.88);
+  color: #334155;
+  border: 1px solid rgba(203, 213, 225, 0.9);
+}
+
+.primary-button {
+  background: linear-gradient(135deg, #0f766e, #14b8a6);
+  color: white;
+  box-shadow: 0 14px 28px rgba(20, 184, 166, 0.18);
+}
+
+.secondary-button:disabled,
+.primary-button:disabled,
+.icon-button:disabled,
+.new-chat-button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  box-shadow: none;
 }
 
 .error-banner {
