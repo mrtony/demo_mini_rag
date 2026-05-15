@@ -151,6 +151,23 @@
   color: #1f2937;
 }
 
+.conversation-item-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.conversation-activity-badge {
+  flex-shrink: 0;
+  border-radius: 999px;
+  padding: 3px 8px;
+  background: rgba(15, 118, 110, 0.12);
+  color: #0f766e;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
 .conversation-item span {
   display: block;
   margin-top: 6px;

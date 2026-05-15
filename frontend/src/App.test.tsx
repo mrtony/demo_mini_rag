@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import App from "./App";
@@ -585,6 +585,113 @@ describe("App", () => {
     const bubble = screen.getByText("Hello world").closest(".message-bubble");
     expect(bubble).not.toHaveClass("streaming");
     expect(mockedStopConversation).toHaveBeenCalledWith("conv-1");
+  });
+
+  it("keeps active streams scoped to their conversation while navigating", async () => {
+    const user = userEvent.setup();
+    let releaseStream: (() => void) | null = null;
+    let emitEvent: ((event: { event: string; data: Record<string, unknown> }) => void) | null = null;
+    let conversationCreated = false;
+
+    mockedListWorkspaces.mockResolvedValue([
+      {
+        workspace_id: "ws-alpha",
+        name: "Workspace Alpha",
+        system_message: "Workspace alpha system",
+        selected_model: {
+          model_id: "gpt-5.4-nano",
+          label: "gpt-5.4-nano",
+          is_enabled: true,
+          is_default_workspace_model: true,
+        },
+        model_settings: {
+          temperature: 0.7,
+        },
+        created_at: "2026-05-15T00:00:00Z",
+        updated_at: "2026-05-15T00:00:00Z",
+      },
+      {
+        workspace_id: "ws-beta",
+        name: "Workspace Beta",
+        system_message: "Workspace beta system",
+        selected_model: {
+          model_id: "gpt-5.4-nano",
+          label: "gpt-5.4-nano",
+          is_enabled: true,
+          is_default_workspace_model: true,
+        },
+        model_settings: {
+          temperature: 0.7,
+        },
+        created_at: "2026-05-15T00:01:00Z",
+        updated_at: "2026-05-15T00:01:00Z",
+      },
+    ]);
+    mockedListWorkspaceConversations.mockImplementation(async (workspaceId: string) => {
+      if (workspaceId === "ws-alpha" && conversationCreated) {
+        return [
+          {
+            workspace_id: "ws-alpha",
+            conversation_id: "conv-1",
+            conversation_title: "背景串流",
+            updated_at: "2026-05-15T00:02:00Z",
+          },
+        ];
+      }
+      return [];
+    });
+    mockedOpenChatStream.mockResolvedValue({ body: {} as ReadableStream<Uint8Array> } as Response);
+    mockedReadSseStream.mockImplementation(async (_body, onEvent) => {
+      conversationCreated = true;
+      emitEvent = onEvent;
+      onEvent({
+        event: "conversation.created",
+        data: { workspace_id: "ws-alpha", conversation_id: "conv-1", conversation_title: "背景串流" },
+      });
+      onEvent({ event: "message.created", data: { message_id: 1 } });
+      onEvent({ event: "message.delta", data: { delta: "Hello" } });
+
+      await new Promise<void>((resolve) => {
+        releaseStream = () => {
+          onEvent({ event: "message.done", data: { status: "completed" } });
+          resolve();
+        };
+      });
+    });
+
+    render(<App />);
+
+    expect(await screen.findByRole("button", { name: "Workspace Alpha gpt-5.4-nano" })).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText("訊息輸入框"), "背景串流");
+    await user.click(screen.getByLabelText("Send message"));
+
+    expect(await screen.findByLabelText("Stop response")).toBeInTheDocument();
+    expect(await screen.findByText("Hello")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Workspace Beta gpt-5.4-nano" }));
+
+    await waitFor(() => expect(screen.queryByLabelText("Stop response")).not.toBeInTheDocument());
+    expect(mockedStopConversation).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Workspace Alpha gpt-5.4-nano" }));
+
+    expect(await screen.findByText("Streaming")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Stop response")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /背景串流/ }));
+
+    expect(mockedGetConversation).not.toHaveBeenCalled();
+    expect(await screen.findByText("Hello")).toBeInTheDocument();
+    expect(screen.getByLabelText("Stop response")).toBeInTheDocument();
+
+    await act(async () => {
+      emitEvent?.({ event: "message.delta", data: { delta: " world" } });
+      releaseStream?.();
+    });
+
+    expect(await screen.findByText("Hello world")).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByLabelText("Stop response")).not.toBeInTheDocument());
   });
 
   it("loads saved history when selecting an older conversation", async () => {

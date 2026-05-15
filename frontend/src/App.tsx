@@ -48,6 +48,8 @@ type SettingsValidationErrors = {
   modelSettings: Record<string, string>;
 };
 
+type ConversationMessagesById = Record<string, ChatBubble[]>;
+
 
 function createLocalBubble(role: ChatBubble["role"], content: string, status: ChatBubble["status"]): ChatBubble {
   const randomId = globalThis.crypto?.randomUUID?.() ?? `${role}-${Date.now()}-${Math.random()}`;
@@ -205,15 +207,24 @@ export default function App() {
   >({});
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | null>(null);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
-  const [messages, setMessages] = useState<ChatBubble[]>([]);
+  const [conversationMessagesById, setConversationMessagesById] = useState<ConversationMessagesById>({});
+  const [pendingConversationMessages, setPendingConversationMessages] = useState<ChatBubble[]>([]);
+  const [pendingConversationWorkspaceId, setPendingConversationWorkspaceId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [newWorkspaceName, setNewWorkspaceName] = useState("");
-  const [isStreaming, setIsStreaming] = useState(false);
+  const [isStreamInFlight, setIsStreamInFlight] = useState(false);
+  const [streamingConversationId, setStreamingConversationId] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [settingsDraft, setSettingsDraft] = useState<WorkspaceSettingsDraft | null>(null);
   const [activeSettingsTab, setActiveSettingsTab] = useState<"general" | "model">("general");
   const abortRef = useRef<AbortController | null>(null);
+  const activeWorkspaceIdRef = useRef<string | null>(null);
+  const activeConversationIdRef = useRef<string | null>(null);
+  const pendingConversationWorkspaceIdRef = useRef<string | null>(null);
+  const pendingConversationMessagesRef = useRef<ChatBubble[]>([]);
+  const streamConversationIdRef = useRef<string | null>(null);
+  const streamWorkspaceIdRef = useRef<string | null>(null);
   const activeAssistantBubbleRef = useRef<string | null>(null);
   const stopRequestedBubbleRef = useRef<string | null>(null);
 
@@ -227,7 +238,6 @@ export default function App() {
   useEffect(() => {
     if (activeWorkspaceId === null) {
       setActiveConversationId(null);
-      setMessages([]);
       setIsSettingsOpen(false);
       setSettingsDraft(null);
       setActiveSettingsTab("general");
@@ -235,6 +245,74 @@ export default function App() {
     }
     void refreshWorkspaceConversations(activeWorkspaceId);
   }, [activeWorkspaceId]);
+
+  useEffect(() => {
+    activeWorkspaceIdRef.current = activeWorkspaceId;
+  }, [activeWorkspaceId]);
+
+  useEffect(() => {
+    activeConversationIdRef.current = activeConversationId;
+  }, [activeConversationId]);
+
+  useEffect(() => {
+    pendingConversationWorkspaceIdRef.current = pendingConversationWorkspaceId;
+  }, [pendingConversationWorkspaceId]);
+
+  function setPendingConversationState(workspaceId: string | null, messages: ChatBubble[]) {
+    pendingConversationMessagesRef.current = messages;
+    setPendingConversationWorkspaceId(workspaceId);
+    setPendingConversationMessages(messages);
+  }
+
+  function replaceConversationMessages(conversationId: string, messages: ChatBubble[]) {
+    setConversationMessagesById((current) => ({
+      ...current,
+      [conversationId]: messages,
+    }));
+  }
+
+  function appendConversationBubbles(conversationId: string, bubbles: ChatBubble[]) {
+    setConversationMessagesById((current) => ({
+      ...current,
+      [conversationId]: [...(current[conversationId] ?? []), ...bubbles],
+    }));
+  }
+
+  function updatePendingBubble(targetBubbleId: string | null, updater: (bubble: ChatBubble) => ChatBubble) {
+    if (targetBubbleId === null) {
+      return;
+    }
+    setPendingConversationMessages((current) => {
+      const nextMessages = current.map((item) => (item.id === targetBubbleId ? updater(item) : item));
+      pendingConversationMessagesRef.current = nextMessages;
+      return nextMessages;
+    });
+  }
+
+  function updateConversationBubble(
+    conversationId: string,
+    targetBubbleId: string | null,
+    updater: (bubble: ChatBubble) => ChatBubble,
+  ) {
+    if (targetBubbleId === null) {
+      return;
+    }
+    setConversationMessagesById((current) => ({
+      ...current,
+      [conversationId]: (current[conversationId] ?? []).map((item) =>
+        item.id === targetBubbleId ? updater(item) : item,
+      ),
+    }));
+  }
+
+  function updateStreamBubble(targetBubbleId: string | null, updater: (bubble: ChatBubble) => ChatBubble) {
+    const conversationId = streamConversationIdRef.current;
+    if (conversationId === null) {
+      updatePendingBubble(targetBubbleId, updater);
+      return;
+    }
+    updateConversationBubble(conversationId, targetBubbleId, updater);
+  }
 
   async function refreshWorkspaces(preferredWorkspaceId?: string) {
     try {
@@ -292,7 +370,6 @@ export default function App() {
         if (currentConversationId && data.some((item) => item.conversation_id === currentConversationId)) {
           return currentConversationId;
         }
-        setMessages([]);
         return null;
       });
     } catch (error) {
@@ -309,10 +386,16 @@ export default function App() {
       setIsSettingsOpen(false);
       setSettingsDraft(null);
       setActiveSettingsTab("general");
+      setActiveConversationId(conversationId);
+
+      if (streamingConversationId === conversationId && (conversationMessagesById[conversationId] ?? []).length > 0) {
+        return;
+      }
+
       const detail = await getConversation(conversationId);
       setActiveWorkspaceId(detail.workspace_id);
       setActiveConversationId(detail.conversation_id);
-      setMessages(toChatBubbles(detail.messages));
+      replaceConversationMessages(detail.conversation_id, toChatBubbles(detail.messages));
     } catch (error) {
       setErrorMessage(getErrorMessage(error));
     }
@@ -335,7 +418,6 @@ export default function App() {
       }));
       setActiveWorkspaceId(createdWorkspace.workspace_id);
       setActiveConversationId(null);
-      setMessages([]);
       setDraft("");
       setNewWorkspaceName("");
     } catch (error) {
@@ -344,7 +426,7 @@ export default function App() {
   }
 
   function startNewConversation() {
-    if (isStreaming || activeWorkspaceId === null) {
+    if (isStreamInFlight || activeWorkspaceId === null) {
       return;
     }
     if (!canLeaveSettingsView()) {
@@ -354,7 +436,6 @@ export default function App() {
     setSettingsDraft(null);
     setActiveSettingsTab("general");
     setActiveConversationId(null);
-    setMessages([]);
     setDraft("");
     setErrorMessage(null);
   }
@@ -371,7 +452,6 @@ export default function App() {
     setActiveSettingsTab("general");
     setActiveWorkspaceId(workspaceId);
     setActiveConversationId(null);
-    setMessages([]);
     setDraft("");
     setErrorMessage(null);
   }
@@ -390,7 +470,6 @@ export default function App() {
         setActiveSettingsTab("general");
         setActiveWorkspaceId(remainingWorkspaces[0]?.workspace_id ?? null);
         setActiveConversationId(null);
-        setMessages([]);
         setDraft("");
       }
     } catch (error) {
@@ -410,7 +489,6 @@ export default function App() {
       }));
       setActiveWorkspaceId(restoredWorkspace.workspace_id);
       setActiveConversationId(null);
-      setMessages([]);
       setDraft("");
     } catch (error) {
       setErrorMessage(getErrorMessage(error));
@@ -454,13 +532,6 @@ export default function App() {
     });
   }
 
-  function updateBubble(targetBubbleId: string | null, updater: (bubble: ChatBubble) => ChatBubble) {
-    if (targetBubbleId === null) {
-      return;
-    }
-    setMessages((current) => current.map((item) => (item.id === targetBubbleId ? updater(item) : item)));
-  }
-
   function handleStreamEvent(event: ParsedSseEvent) {
     const targetBubbleId = activeAssistantBubbleRef.current;
 
@@ -469,8 +540,19 @@ export default function App() {
       const conversationId = String(event.data.conversation_id);
       const title = String(event.data.conversation_title ?? EMPTY_TITLE);
       const now = new Date().toISOString();
-      setActiveWorkspaceId(workspaceId);
-      setActiveConversationId(conversationId);
+      const shouldOpenCreatedConversation =
+        activeWorkspaceIdRef.current === workspaceId &&
+        activeConversationIdRef.current === null &&
+        pendingConversationWorkspaceIdRef.current === workspaceId;
+
+      replaceConversationMessages(conversationId, pendingConversationMessagesRef.current);
+      setPendingConversationState(null, []);
+      streamConversationIdRef.current = conversationId;
+      setStreamingConversationId(conversationId);
+
+      if (shouldOpenCreatedConversation) {
+        setActiveConversationId(conversationId);
+      }
       upsertConversation(workspaceId, {
         workspace_id: workspaceId,
         conversation_id: conversationId,
@@ -496,7 +578,7 @@ export default function App() {
 
     if (event.event === "message.created") {
       const messageId = Number(event.data.message_id);
-      updateBubble(targetBubbleId, (item) => ({
+      updateStreamBubble(targetBubbleId, (item) => ({
         ...item,
         messageId,
       }));
@@ -505,7 +587,7 @@ export default function App() {
 
     if (event.event === "message.delta") {
       const delta = String(event.data.delta ?? "");
-      updateBubble(targetBubbleId, (item) => ({
+      updateStreamBubble(targetBubbleId, (item) => ({
         ...item,
         content: item.content + delta,
         status: stopRequestedBubbleRef.current === item.id || item.status === "stopped" ? "stopped" : "streaming",
@@ -517,7 +599,7 @@ export default function App() {
       const status = event.data.status;
       const nextStatus: ChatBubble["status"] =
         status === "completed" || status === "stopped" || status === "error" ? status : "completed";
-      updateBubble(targetBubbleId, (item) => ({
+      updateStreamBubble(targetBubbleId, (item) => ({
         ...item,
         status:
           stopRequestedBubbleRef.current === item.id && nextStatus !== "error"
@@ -531,7 +613,7 @@ export default function App() {
 
     if (event.event === "error") {
       setErrorMessage(String(event.data.message ?? "Streaming failed"));
-      updateBubble(targetBubbleId, (item) => ({
+      updateStreamBubble(targetBubbleId, (item) => ({
         ...item,
         status: stopRequestedBubbleRef.current === item.id ? "stopped" : "error",
       }));
@@ -543,7 +625,7 @@ export default function App() {
     const trimmed = draft.trim();
     if (
       !trimmed ||
-      isStreaming ||
+      isStreamInFlight ||
       activeWorkspaceId === null ||
       activeWorkspace?.selected_model.is_enabled === false
     ) {
@@ -557,11 +639,19 @@ export default function App() {
     const assistantBubble = createLocalBubble("assistant", "", "streaming");
     activeAssistantBubbleRef.current = assistantBubble.id;
     stopRequestedBubbleRef.current = null;
-    setMessages((current) => [...current, userBubble, assistantBubble]);
+    streamConversationIdRef.current = activeConversationId;
+    streamWorkspaceIdRef.current = activeWorkspaceId;
+
+    if (activeConversationId === null) {
+      setPendingConversationState(activeWorkspaceId, [userBubble, assistantBubble]);
+    } else {
+      appendConversationBubbles(activeConversationId, [userBubble, assistantBubble]);
+      setStreamingConversationId(activeConversationId);
+    }
 
     const controller = new AbortController();
     abortRef.current = controller;
-    setIsStreaming(true);
+    setIsStreamInFlight(true);
 
     try {
       const response = await openChatStream(
@@ -577,39 +667,43 @@ export default function App() {
       await readSseStream(response.body!, handleStreamEvent, controller.signal);
     } catch (error) {
       if (isAbortError(error)) {
-        updateBubble(stopRequestedBubbleRef.current, (item) => ({
+        updateStreamBubble(stopRequestedBubbleRef.current, (item) => ({
           ...item,
           status: "stopped",
         }));
       } else {
         setErrorMessage(getErrorMessage(error));
-        updateBubble(activeAssistantBubbleRef.current, (item) => ({
+        updateStreamBubble(activeAssistantBubbleRef.current, (item) => ({
           ...item,
           status: "error",
         }));
       }
     } finally {
       const stoppedBubbleId = stopRequestedBubbleRef.current;
-      updateBubble(stoppedBubbleId, (item) => ({
+      const streamWorkspaceId = streamWorkspaceIdRef.current;
+      updateStreamBubble(stoppedBubbleId, (item) => ({
         ...item,
         status: item.status === "error" ? item.status : "stopped",
       }));
       abortRef.current = null;
-      setIsStreaming(false);
+      setIsStreamInFlight(false);
+      setStreamingConversationId(null);
+      streamConversationIdRef.current = null;
+      streamWorkspaceIdRef.current = null;
       activeAssistantBubbleRef.current = null;
       stopRequestedBubbleRef.current = null;
-      if (activeWorkspaceId !== null) {
-        void refreshWorkspaceConversations(activeWorkspaceId);
+      if (streamWorkspaceId !== null) {
+        void refreshWorkspaceConversations(streamWorkspaceId);
       }
     }
   }
 
   async function stopStreaming() {
-    const targetConversationId = activeConversationId;
+    const targetConversationId = activeConversationId ?? streamConversationIdRef.current;
     const targetAssistantBubbleId = activeAssistantBubbleRef.current;
     stopRequestedBubbleRef.current = targetAssistantBubbleId;
 
-    updateBubble(targetAssistantBubbleId, (item) => ({
+    updateStreamBubble(targetAssistantBubbleId, (item) => ({
       ...item,
       status: "stopped",
     }));
@@ -643,11 +737,24 @@ export default function App() {
         JSON.stringify(normalizeModelSettings(settingsWorkspace.model_settings)));
   const canSaveSettings = hasPendingSettings && !hasValidationErrors(settingsValidationErrors);
   const visibleConversations = activeWorkspaceId ? conversationSummariesByWorkspaceId[activeWorkspaceId] ?? [] : [];
+  const activeMessages =
+    activeConversationId === null
+      ? pendingConversationWorkspaceId === activeWorkspaceId
+        ? pendingConversationMessages
+        : []
+      : conversationMessagesById[activeConversationId] ?? [];
   const activeTitle =
     visibleConversations.find((item) => item.conversation_id === activeConversationId)?.conversation_title ??
     EMPTY_TITLE;
   const isGenerationBlocked = activeWorkspace?.selected_model.is_enabled === false;
-  const showSendButton = !isStreaming && draft.trim().length > 0 && !isGenerationBlocked;
+  const showSendButton = !isStreamInFlight && draft.trim().length > 0 && !isGenerationBlocked;
+  const showStopButton =
+    isStreamInFlight &&
+    ((activeConversationId !== null && activeConversationId === streamingConversationId) ||
+      (activeConversationId === null &&
+        pendingConversationWorkspaceId === activeWorkspaceId &&
+        streamingConversationId === null &&
+        pendingConversationMessages.length > 0));
   const selectedModelOptionMissing =
     settingsDraft !== null &&
     settingsWorkspace !== null &&
@@ -851,7 +958,7 @@ export default function App() {
             onClick={startNewConversation}
             aria-label={"\u65b0\u589e\u5c0d\u8a71"}
             title={"\u65b0\u589e\u5c0d\u8a71"}
-            disabled={activeWorkspaceId === null || isStreaming}
+            disabled={activeWorkspaceId === null || isStreamInFlight}
           >
             <PlusIcon />
           </button>
@@ -867,7 +974,12 @@ export default function App() {
               }`}
               onClick={() => void loadConversation(conversation.conversation_id)}
             >
-              <strong>{conversation.conversation_title}</strong>
+              <div className="conversation-item-header">
+                <strong>{conversation.conversation_title}</strong>
+                {conversation.conversation_id === streamingConversationId ? (
+                  <span className="conversation-activity-badge">Streaming</span>
+                ) : null}
+              </div>
               <span>{formatTime(conversation.updated_at)}</span>
             </button>
           ))}
@@ -1055,7 +1167,7 @@ export default function App() {
         ) : (
           <>
             <section className="messages">
-              {messages.length === 0 ? (
+              {activeMessages.length === 0 ? (
                 <div className="empty-state">
                   <h3>
                     {activeWorkspace
@@ -1073,7 +1185,7 @@ export default function App() {
                   </p>
                 </div>
               ) : (
-                messages.map((message) => (
+                activeMessages.map((message) => (
                   <div key={message.id} className={`message-row ${message.role}`}>
                     <div className={`message-bubble ${message.status === "streaming" ? "streaming" : ""}`}>
                       <div>{message.content || (message.status === "streaming" ? " " : "")}</div>
@@ -1106,7 +1218,7 @@ export default function App() {
                 />
 
                 <div className="composer-actions">
-                  {isStreaming ? (
+                  {showStopButton ? (
                     <button
                       type="button"
                       className="icon-button stop"

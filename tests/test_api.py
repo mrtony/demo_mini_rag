@@ -394,6 +394,95 @@ async def test_next_turn_uses_only_latest_saved_workspace_settings(test_client):
 
 
 @pytest.mark.asyncio
+async def test_running_stream_keeps_send_time_workspace_settings_until_completion(test_client):
+    workspace = await create_workspace(test_client, "Workspace Snapshot")
+
+    class BlockingRecordingChatService:
+        configure_calls: list[dict[str, object]] = []
+        first_delta_emitted = asyncio.Event()
+        allow_completion = asyncio.Event()
+
+        def configure_runtime(
+            self,
+            *,
+            system_prompt: str,
+            chat_model: str,
+            model_settings: dict[str, object],
+        ) -> None:
+            self.__class__.configure_calls.append(
+                {
+                    "system_prompt": system_prompt,
+                    "chat_model": chat_model,
+                    "model_settings": model_settings,
+                }
+            )
+
+        async def stream_chat(self, messages, user_message):
+            yield ChatEvent(state=ChatStreamState.STARTED, response_id="resp_snapshot_1")
+            yield ChatEvent(state=ChatStreamState.DELTA, delta="Hello", response_id="resp_snapshot_1")
+            self.__class__.first_delta_emitted.set()
+            await self.__class__.allow_completion.wait()
+            yield ChatEvent(state=ChatStreamState.COMPLETED, response_id="resp_snapshot_1")
+
+        async def generate_title(self, first_message: str) -> str:
+            return "Snapshot title"
+
+        async def maybe_close_stream(self, stream) -> None:
+            return None
+
+    app.dependency_overrides[get_chat_service] = BlockingRecordingChatService
+    BlockingRecordingChatService.configure_calls = []
+    BlockingRecordingChatService.first_delta_emitted = asyncio.Event()
+    BlockingRecordingChatService.allow_completion = asyncio.Event()
+
+    try:
+        response_task = asyncio.create_task(
+            test_client.post(
+                "/api/chat/stream",
+                json={
+                    "workspace_id": workspace["workspace_id"],
+                    "conversation_id": 0,
+                    "message_id": 0,
+                    "message": "第一句",
+                },
+            )
+        )
+
+        await BlockingRecordingChatService.first_delta_emitted.wait()
+
+        update_response = await test_client.put(
+            f"/api/workspaces/{workspace['workspace_id']}",
+            json={
+                "name": "Workspace Snapshot",
+                "system_message": "Updated while the first stream is still running.",
+                "selected_model_id": "gpt-5.4-mini",
+                "model_settings": {
+                    "temperature": 1.6,
+                    "reasoning_effort": "high",
+                },
+            },
+        )
+        assert update_response.status_code == 200
+
+        assert BlockingRecordingChatService.configure_calls == [
+            {
+                "system_prompt": workspace["system_message"],
+                "chat_model": workspace["selected_model"]["model_id"],
+                "model_settings": workspace["model_settings"],
+            }
+        ]
+
+        BlockingRecordingChatService.allow_completion.set()
+        response = await response_task
+
+        assert response.status_code == 200
+        events = parse_sse_payload(response.text)
+        assert events[-1] == ("message.done", {"message_id": 1, "status": "completed"})
+    finally:
+        app.dependency_overrides.pop(get_chat_service, None)
+
+
+@pytest.mark.asyncio
 async def test_first_prompt_creates_conversation_for_workspace_at_acceptance_time(test_client):
     workspace = await create_workspace(test_client)
 
