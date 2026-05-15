@@ -5,6 +5,7 @@ import "./App.css";
 import {
   archiveWorkspace,
   createWorkspace,
+  deleteConversation,
   getDefaultWorkspaceModel,
   getConversation,
   listArchivedWorkspaces,
@@ -718,6 +719,46 @@ export default function App() {
     abortRef.current?.abort();
   }
 
+  async function handleDeleteConversation(conversationId: string, conversationTitle: string) {
+    if (!window.confirm(`Delete "${conversationTitle}" permanently?`)) {
+      return;
+    }
+
+    try {
+      setErrorMessage(null);
+
+      const isStreamingConversation = streamingConversationId === conversationId;
+      if (isStreamingConversation) {
+        stopRequestedBubbleRef.current = activeAssistantBubbleRef.current;
+        try {
+          await stopConversation(conversationId);
+        } catch {
+          // Best effort server-side cancellation.
+        }
+        abortRef.current?.abort();
+      }
+
+      await deleteConversation(conversationId);
+
+      setConversationSummariesByWorkspaceId((current) => {
+        const updated: Record<string, ConversationSummary[]> = {};
+        for (const wsId of Object.keys(current)) {
+          updated[wsId] = current[wsId].filter((c) => c.conversation_id !== conversationId);
+        }
+        return updated;
+      });
+      setConversationMessagesById((current) => {
+        const { [conversationId]: _removed, ...rest } = current;
+        return rest;
+      });
+      if (activeConversationId === conversationId) {
+        setActiveConversationId(null);
+      }
+    } catch (error) {
+      setErrorMessage(getErrorMessage(error));
+    }
+  }
+
   const activeWorkspace = workspaces.find((item) => item.workspace_id === activeWorkspaceId) ?? null;
   const modelCatalogById = new Map(modelCatalog.map((item) => [item.model_id, item]));
   const settingsWorkspace =
@@ -966,22 +1007,38 @@ export default function App() {
 
         <div className="conversation-list">
           {visibleConversations.map((conversation) => (
-            <button
-              key={conversation.conversation_id}
-              type="button"
-              className={`conversation-item${
-                conversation.conversation_id === activeConversationId ? " active" : ""
-              }`}
-              onClick={() => void loadConversation(conversation.conversation_id)}
-            >
-              <div className="conversation-item-header">
-                <strong>{conversation.conversation_title}</strong>
-                {conversation.conversation_id === streamingConversationId ? (
-                  <span className="conversation-activity-badge">Streaming</span>
-                ) : null}
+            <div key={conversation.conversation_id} className="conversation-row">
+              <button
+                type="button"
+                className={`conversation-item${
+                  conversation.conversation_id === activeConversationId ? " active" : ""
+                }`}
+                onClick={() => void loadConversation(conversation.conversation_id)}
+              >
+                <div className="conversation-item-header">
+                  <strong>{conversation.conversation_title}</strong>
+                  {conversation.conversation_id === streamingConversationId ? (
+                    <span className="conversation-activity-badge">Streaming</span>
+                  ) : null}
+                </div>
+                <span>{formatTime(conversation.updated_at)}</span>
+              </button>
+              <div className="conversation-actions">
+                <button
+                  type="button"
+                  className="workspace-action-button warn"
+                  onClick={() =>
+                    void handleDeleteConversation(
+                      conversation.conversation_id,
+                      conversation.conversation_title,
+                    )
+                  }
+                  aria-label={`Delete ${conversation.conversation_title}`}
+                >
+                  Delete
+                </button>
               </div>
-              <span>{formatTime(conversation.updated_at)}</span>
-            </button>
+            </div>
           ))}
         </div>
       </aside>

@@ -581,6 +581,23 @@ async def stop_conversation_stream(conversation_id: str):
     return {"stopped": True}
 
 
+@router.delete("/conversations/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_conversation(
+    conversation_id: str,
+    session: AsyncSession = Depends(get_db_session),
+) -> None:
+    conversation = await _load_conversation_or_404(session, conversation_id)
+
+    stop_event = ACTIVE_STREAMS.get(conversation_id)
+    if stop_event is not None:
+        stop_event.set()
+        logger.info("Active stream stopped for conversation %s during deletion", conversation_id)
+
+    await session.delete(conversation)
+    await session.commit()
+    logger.info("Conversation %s permanently deleted", conversation_id)
+
+
 @router.post("/chat/stream")
 async def stream_chat(
     payload: ChatStreamRequest,

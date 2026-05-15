@@ -746,6 +746,37 @@ async def test_disabled_model_workspace_remains_readable_but_blocks_new_generati
 
 
 @pytest.mark.asyncio
+async def test_deletes_conversation_permanently_and_removes_from_workspace_history(test_client):
+    workspace = await create_workspace(test_client, "Workspace Delete")
+
+    stream_response = await test_client.post(
+        "/api/chat/stream",
+        json={
+            "workspace_id": workspace["workspace_id"],
+            "conversation_id": 0,
+            "message_id": 0,
+            "message": "刪除測試",
+        },
+    )
+    assert stream_response.status_code == 200
+    conversation_id = parse_sse_payload(stream_response.text)[0][1]["conversation_id"]
+
+    conversations_before = await test_client.get(f"/api/workspaces/{workspace['workspace_id']}/conversations")
+    assert conversations_before.status_code == 200
+    assert len(conversations_before.json()) == 1
+
+    delete_response = await test_client.delete(f"/api/conversations/{conversation_id}")
+    assert delete_response.status_code == 204
+
+    conversations_after = await test_client.get(f"/api/workspaces/{workspace['workspace_id']}/conversations")
+    assert conversations_after.status_code == 200
+    assert conversations_after.json() == []
+
+    detail_response = await test_client.get(f"/api/conversations/{conversation_id}")
+    assert detail_response.status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_get_db_session_ignores_close_errors(monkeypatch):
     from backend.app import db as db_module
 

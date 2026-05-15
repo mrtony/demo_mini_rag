@@ -5,6 +5,7 @@ import App from "./App";
 import {
   archiveWorkspace,
   createWorkspace,
+  deleteConversation,
   getDefaultWorkspaceModel,
   getConversation,
   listArchivedWorkspaces,
@@ -22,6 +23,7 @@ import { readSseStream } from "./lib/sse";
 vi.mock("./api", () => ({
   archiveWorkspace: vi.fn(),
   createWorkspace: vi.fn(),
+  deleteConversation: vi.fn(),
   getDefaultWorkspaceModel: vi.fn(),
   getConversation: vi.fn(),
   listArchivedWorkspaces: vi.fn(),
@@ -58,6 +60,7 @@ vi.mock("./lib/sse", () => ({
 }));
 
 const mockedCreateWorkspace = vi.mocked(createWorkspace);
+const mockedDeleteConversation = vi.mocked(deleteConversation);
 const mockedGetDefaultWorkspaceModel = vi.mocked(getDefaultWorkspaceModel);
 const mockedGetConversation = vi.mocked(getConversation);
 const mockedArchiveWorkspace = vi.mocked(archiveWorkspace);
@@ -76,6 +79,7 @@ describe("App", () => {
   beforeEach(() => {
     mockedArchiveWorkspace.mockReset();
     mockedCreateWorkspace.mockReset();
+    mockedDeleteConversation.mockReset();
     mockedGetDefaultWorkspaceModel.mockReset();
     mockedGetConversation.mockReset();
     mockedListArchivedWorkspaces.mockReset();
@@ -90,6 +94,7 @@ describe("App", () => {
     mockedReadSseStream.mockReset();
     mockedListArchivedWorkspaces.mockResolvedValue([]);
     mockedStopConversation.mockResolvedValue(undefined);
+    mockedDeleteConversation.mockResolvedValue(undefined);
     mockedListModels.mockResolvedValue([
       {
         model_id: "gpt-5.4-mini",
@@ -509,7 +514,7 @@ describe("App", () => {
       expect.any(AbortSignal),
     );
     expect(mockedGetDefaultWorkspaceModel).toHaveBeenCalledTimes(1);
-    expect(await screen.findByRole("button", { name: /第一句話/ })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /^第一句話/ })).toBeInTheDocument();
   });
 
   it("keeps a stopped bubble stopped even if a final delta arrives after abort", async () => {
@@ -679,7 +684,7 @@ describe("App", () => {
     expect(await screen.findByText("Streaming")).toBeInTheDocument();
     expect(screen.queryByLabelText("Stop response")).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /背景串流/ }));
+    await user.click(screen.getByRole("button", { name: /^背景串流/ }));
 
     expect(mockedGetConversation).not.toHaveBeenCalled();
     expect(await screen.findByText("Hello")).toBeInTheDocument();
@@ -743,7 +748,7 @@ describe("App", () => {
 
     render(<App />);
 
-    await user.click(await screen.findByRole("button", { name: /較早的對話/ }));
+    await user.click(await screen.findByRole("button", { name: /^較早的對話/ }));
 
     expect(await screen.findByText("舊問題")).toBeInTheDocument();
     expect(await screen.findByText("舊回答")).toBeInTheDocument();
@@ -997,5 +1002,172 @@ describe("App", () => {
 
     expect(screen.getByText("System Message cannot be blank")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Save settings" })).toBeDisabled();
+  });
+
+  it("requires Delete Confirmation before permanently removing a Conversation", async () => {
+    const user = userEvent.setup();
+    const confirmSpy = vi.spyOn(window, "confirm");
+
+    mockedListWorkspaces.mockResolvedValue([
+      {
+        workspace_id: "ws-1",
+        name: "Workspace One",
+        system_message: "system",
+        selected_model: {
+          model_id: "gpt-5.4-nano",
+          label: "gpt-5.4-nano",
+          is_enabled: true,
+          is_default_workspace_model: true,
+        },
+        model_settings: { temperature: 0.7 },
+        created_at: "2026-05-15T00:00:00Z",
+        updated_at: "2026-05-15T00:00:00Z",
+      },
+    ]);
+    mockedListWorkspaceConversations.mockResolvedValue([
+      {
+        workspace_id: "ws-1",
+        conversation_id: "conv-1",
+        conversation_title: "Old Chat",
+        updated_at: "2026-05-15T00:01:00Z",
+      },
+    ]);
+
+    render(<App />);
+
+    expect(await screen.findByText("Old Chat")).toBeInTheDocument();
+
+    confirmSpy.mockReturnValueOnce(true);
+    await user.click(screen.getByRole("button", { name: "Delete Old Chat" }));
+
+    expect(confirmSpy).toHaveBeenCalled();
+    await waitFor(() => expect(mockedDeleteConversation).toHaveBeenCalledWith("conv-1"));
+    expect(screen.queryByText("Old Chat")).not.toBeInTheDocument();
+
+    confirmSpy.mockRestore();
+  });
+
+  it("cancels deletion when Delete Confirmation is dismissed", async () => {
+    const user = userEvent.setup();
+    const confirmSpy = vi.spyOn(window, "confirm");
+
+    mockedListWorkspaces.mockResolvedValue([
+      {
+        workspace_id: "ws-1",
+        name: "Workspace One",
+        system_message: "system",
+        selected_model: {
+          model_id: "gpt-5.4-nano",
+          label: "gpt-5.4-nano",
+          is_enabled: true,
+          is_default_workspace_model: true,
+        },
+        model_settings: { temperature: 0.7 },
+        created_at: "2026-05-15T00:00:00Z",
+        updated_at: "2026-05-15T00:00:00Z",
+      },
+    ]);
+    mockedListWorkspaceConversations.mockResolvedValue([
+      {
+        workspace_id: "ws-1",
+        conversation_id: "conv-1",
+        conversation_title: "Keep Chat",
+        updated_at: "2026-05-15T00:01:00Z",
+      },
+    ]);
+
+    render(<App />);
+
+    expect(await screen.findByText("Keep Chat")).toBeInTheDocument();
+
+    confirmSpy.mockReturnValueOnce(false);
+    await user.click(screen.getByRole("button", { name: "Delete Keep Chat" }));
+
+    expect(confirmSpy).toHaveBeenCalled();
+    expect(mockedDeleteConversation).not.toHaveBeenCalled();
+    expect(screen.getByText("Keep Chat")).toBeInTheDocument();
+
+    confirmSpy.mockRestore();
+  });
+
+  it("stops Active Stream before deleting a streaming Conversation", async () => {
+    const user = userEvent.setup();
+    const confirmSpy = vi.spyOn(window, "confirm");
+    let conversationCreated = false;
+    let releaseStream: (() => void) | null = null;
+
+    mockedListWorkspaces.mockResolvedValue([
+      {
+        workspace_id: "ws-1",
+        name: "Workspace One",
+        system_message: "system",
+        selected_model: {
+          model_id: "gpt-5.4-nano",
+          label: "gpt-5.4-nano",
+          is_enabled: true,
+          is_default_workspace_model: true,
+        },
+        model_settings: { temperature: 0.7 },
+        created_at: "2026-05-15T00:00:00Z",
+        updated_at: "2026-05-15T00:00:00Z",
+      },
+    ]);
+    mockedListWorkspaceConversations.mockImplementation(async () =>
+      conversationCreated
+        ? [
+            {
+              workspace_id: "ws-1",
+              conversation_id: "conv-stream",
+              conversation_title: "Streaming Chat",
+              updated_at: "2026-05-15T00:01:00Z",
+            },
+          ]
+        : [],
+    );
+    mockedOpenChatStream.mockResolvedValue({ body: {} as ReadableStream<Uint8Array> } as Response);
+    mockedReadSseStream.mockImplementation(async (_body, onEvent) => {
+      conversationCreated = true;
+      onEvent({
+        event: "conversation.created",
+        data: { workspace_id: "ws-1", conversation_id: "conv-stream", conversation_title: "Streaming Chat" },
+      });
+      onEvent({ event: "message.created", data: { message_id: 1 } });
+      onEvent({ event: "message.delta", data: { delta: "Hello" } });
+      await new Promise<void>((resolve) => {
+        releaseStream = () => {
+          onEvent({ event: "message.done", data: { status: "completed" } });
+          resolve();
+        };
+      });
+    });
+
+    const callOrder: string[] = [];
+    mockedStopConversation.mockImplementation(async () => {
+      callOrder.push("stop");
+    });
+    mockedDeleteConversation.mockImplementation(async () => {
+      callOrder.push("delete");
+    });
+
+    render(<App />);
+
+    expect(await screen.findByRole("button", { name: "Workspace One gpt-5.4-nano" })).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText("訊息輸入框"), "Hello");
+    await user.click(screen.getByLabelText("Send message"));
+
+    expect(await screen.findByText("Streaming")).toBeInTheDocument();
+
+    confirmSpy.mockReturnValueOnce(true);
+    await user.click(screen.getByRole("button", { name: "Delete Streaming Chat" }));
+
+    await waitFor(() => expect(mockedDeleteConversation).toHaveBeenCalledWith("conv-stream"));
+    expect(mockedStopConversation).toHaveBeenCalledWith("conv-stream");
+    expect(callOrder.indexOf("stop")).toBeLessThan(callOrder.indexOf("delete"));
+    expect(screen.queryByText("Streaming Chat")).not.toBeInTheDocument();
+
+    await act(async () => { releaseStream?.(); });
+
+    confirmSpy.mockRestore();
   });
 });

@@ -146,6 +146,24 @@ export async function stopConversation(conversationId: string): Promise<void> {
   });
 }
 
+export async function deleteConversation(conversationId: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/api/conversations/${conversationId}`, {
+    method: "DELETE",
+  });
+  if (!response.ok) {
+    let message = `Request failed with status ${response.status}`;
+    try {
+      const payload = (await response.json()) as { detail?: string };
+      if (typeof payload.detail === "string" && payload.detail.trim().length > 0) {
+        message = payload.detail;
+      }
+    } catch {
+      // Ignore JSON parsing failures and keep the status-based message.
+    }
+    throw new Error(message);
+  }
+}
+
 export function toChatBubbles(messages: StoredMessage[]): ChatBubble[] {
   return messages.flatMap((message) => [
     {
