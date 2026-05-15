@@ -24,6 +24,7 @@ from .schemas import (
     ModelCatalogSummary,
     StoredMessage,
     WorkspaceCreateRequest,
+    WorkspaceUpdateRequest,
     WorkspaceSummary,
 )
 from .services.chat_service import ChatService
@@ -233,6 +234,22 @@ async def create_workspace(
 
     created_workspace = await _load_workspace_or_404(session, workspace.workspace_id)
     return _serialize_workspace(created_workspace)
+
+
+@router.put("/workspaces/{workspace_id}", response_model=WorkspaceSummary)
+async def update_workspace(
+    workspace_id: str,
+    payload: WorkspaceUpdateRequest,
+    session: AsyncSession = Depends(get_db_session),
+) -> WorkspaceSummary:
+    workspace = await _load_workspace_or_404(session, workspace_id)
+    workspace.name = payload.name
+    workspace.system_message = payload.system_message
+    workspace.updated_at = _utc_now()
+    await session.commit()
+
+    updated_workspace = await _load_workspace_or_404(session, workspace_id)
+    return _serialize_workspace(updated_workspace)
 
 
 @router.get("/workspaces/{workspace_id}/conversations", response_model=list[ConversationSummary])

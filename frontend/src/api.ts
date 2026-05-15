@@ -33,6 +33,20 @@ export async function createWorkspace(name: string): Promise<WorkspaceSummary> {
   return expectJson<WorkspaceSummary>(response);
 }
 
+export async function updateWorkspace(
+  workspaceId: string,
+  payload: { name: string; system_message: string },
+): Promise<WorkspaceSummary> {
+  const response = await fetch(`${API_BASE}/api/workspaces/${workspaceId}`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+  return expectJson<WorkspaceSummary>(response);
+}
+
 export async function getDefaultWorkspaceModel(): Promise<ModelCatalogSummary> {
   const response = await fetch(`${API_BASE}/api/workspaces/default-model`);
   return expectJson<ModelCatalogSummary>(response);

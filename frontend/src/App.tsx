@@ -11,6 +11,7 @@ import {
   openChatStream,
   stopConversation,
   toChatBubbles,
+  updateWorkspace,
 } from "./api";
 import { PlusIcon, SendIcon, StopIcon } from "./components/Icons";
 import { readSseStream } from "./lib/sse";
@@ -24,6 +25,17 @@ import type {
 
 
 const EMPTY_TITLE = "\u65b0\u5c0d\u8a71";
+
+type WorkspaceSettingsDraft = {
+  workspaceId: string;
+  name: string;
+  systemMessage: string;
+};
+
+type SettingsValidationErrors = {
+  name?: string;
+  systemMessage?: string;
+};
 
 
 function createLocalBubble(role: ChatBubble["role"], content: string, status: ChatBubble["status"]): ChatBubble {
@@ -54,6 +66,36 @@ function sortConversations(conversations: ConversationSummary[]): ConversationSu
 }
 
 
+function createSettingsDraft(workspace: WorkspaceSummary): WorkspaceSettingsDraft {
+  return {
+    workspaceId: workspace.workspace_id,
+    name: workspace.name,
+    systemMessage: workspace.system_message,
+  };
+}
+
+
+function getSettingsValidationErrors(draft: WorkspaceSettingsDraft | null): SettingsValidationErrors {
+  if (draft === null) {
+    return {};
+  }
+
+  const errors: SettingsValidationErrors = {};
+  if (draft.name.trim().length < 3) {
+    errors.name = "Workspace Name must be at least three characters long";
+  }
+  if (draft.systemMessage.trim().length === 0) {
+    errors.systemMessage = "System Message cannot be blank";
+  }
+  return errors;
+}
+
+
+function hasValidationErrors(errors: SettingsValidationErrors): boolean {
+  return Boolean(errors.name || errors.systemMessage);
+}
+
+
 export default function App() {
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
   const [defaultWorkspaceModel, setDefaultWorkspaceModel] = useState<ModelCatalogSummary | null>(null);
@@ -67,6 +109,8 @@ export default function App() {
   const [newWorkspaceName, setNewWorkspaceName] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [settingsDraft, setSettingsDraft] = useState<WorkspaceSettingsDraft | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const activeAssistantBubbleRef = useRef<string | null>(null);
   const stopRequestedBubbleRef = useRef<string | null>(null);
@@ -80,6 +124,8 @@ export default function App() {
     if (activeWorkspaceId === null) {
       setActiveConversationId(null);
       setMessages([]);
+      setIsSettingsOpen(false);
+      setSettingsDraft(null);
       return;
     }
     void refreshWorkspaceConversations(activeWorkspaceId);
@@ -132,8 +178,13 @@ export default function App() {
   }
 
   async function loadConversation(conversationId: string) {
+    if (!canLeaveSettingsView()) {
+      return;
+    }
     try {
       setErrorMessage(null);
+      setIsSettingsOpen(false);
+      setSettingsDraft(null);
       const detail = await getConversation(conversationId);
       setActiveWorkspaceId(detail.workspace_id);
       setActiveConversationId(detail.conversation_id);
@@ -172,6 +223,11 @@ export default function App() {
     if (isStreaming || activeWorkspaceId === null) {
       return;
     }
+    if (!canLeaveSettingsView()) {
+      return;
+    }
+    setIsSettingsOpen(false);
+    setSettingsDraft(null);
     setActiveConversationId(null);
     setMessages([]);
     setDraft("");
@@ -182,6 +238,11 @@ export default function App() {
     if (workspaceId === activeWorkspaceId) {
       return;
     }
+    if (!canLeaveSettingsView()) {
+      return;
+    }
+    setIsSettingsOpen(false);
+    setSettingsDraft(null);
     setActiveWorkspaceId(workspaceId);
     setActiveConversationId(null);
     setMessages([]);
@@ -372,11 +433,66 @@ export default function App() {
   }
 
   const activeWorkspace = workspaces.find((item) => item.workspace_id === activeWorkspaceId) ?? null;
+  const settingsWorkspace =
+    settingsDraft === null
+      ? null
+      : workspaces.find((item) => item.workspace_id === settingsDraft.workspaceId) ?? activeWorkspace;
+  const settingsValidationErrors = getSettingsValidationErrors(settingsDraft);
+  const hasPendingSettings =
+    settingsDraft !== null &&
+    settingsWorkspace !== null &&
+    (settingsDraft.name !== settingsWorkspace.name || settingsDraft.systemMessage !== settingsWorkspace.system_message);
+  const canSaveSettings = hasPendingSettings && !hasValidationErrors(settingsValidationErrors);
   const visibleConversations = activeWorkspaceId ? conversationSummariesByWorkspaceId[activeWorkspaceId] ?? [] : [];
   const activeTitle =
     visibleConversations.find((item) => item.conversation_id === activeConversationId)?.conversation_title ??
     EMPTY_TITLE;
   const showSendButton = !isStreaming && draft.trim().length > 0;
+
+  function canLeaveSettingsView(): boolean {
+    if (!isSettingsOpen || !hasPendingSettings) {
+      return true;
+    }
+    return window.confirm("Discard pending settings?");
+  }
+
+  function openWorkspaceSettings() {
+    if (activeWorkspace === null) {
+      return;
+    }
+    setErrorMessage(null);
+    setIsSettingsOpen(true);
+    setSettingsDraft(createSettingsDraft(activeWorkspace));
+  }
+
+  function closeWorkspaceSettings() {
+    if (!canLeaveSettingsView()) {
+      return;
+    }
+    setIsSettingsOpen(false);
+    setSettingsDraft(null);
+  }
+
+  async function saveWorkspaceSettings() {
+    if (settingsDraft === null || !canSaveSettings) {
+      return;
+    }
+
+    try {
+      setErrorMessage(null);
+      const updatedWorkspace = await updateWorkspace(settingsDraft.workspaceId, {
+        name: settingsDraft.name.trim(),
+        system_message: settingsDraft.systemMessage.trim(),
+      });
+      setWorkspaces((current) =>
+        current.map((item) => (item.workspace_id === updatedWorkspace.workspace_id ? updatedWorkspace : item)),
+      );
+      setSettingsDraft(createSettingsDraft(updatedWorkspace));
+      setIsSettingsOpen(true);
+    } catch (error) {
+      setErrorMessage(getErrorMessage(error));
+    }
+  }
 
   return (
     <div className="app-shell">
@@ -458,79 +574,163 @@ export default function App() {
 
       <main className="chat-panel">
         <div className="chat-header">
-          <h2>{activeTitle}</h2>
-          <p>
-            {activeWorkspace
-              ? `${activeWorkspace.name} | ${activeWorkspace.selected_model.label}`
-              : "Create a Workspace before starting a Conversation."}
-          </p>
+          <div className="chat-header-row">
+            <div>
+              <h2>{isSettingsOpen ? "Workspace Settings" : activeTitle}</h2>
+              <p>
+                {activeWorkspace
+                  ? `${activeWorkspace.name} | ${activeWorkspace.selected_model.label}`
+                  : "Create a Workspace before starting a Conversation."}
+              </p>
+            </div>
+            {activeWorkspace ? (
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={isSettingsOpen ? closeWorkspaceSettings : openWorkspaceSettings}
+                aria-label={isSettingsOpen ? "Back to chat" : "Open workspace settings"}
+              >
+                {isSettingsOpen ? "Back to chat" : "Settings"}
+              </button>
+            ) : null}
+          </div>
         </div>
 
         {errorMessage ? <div className="error-banner">{errorMessage}</div> : null}
 
-        <section className="messages">
-          {messages.length === 0 ? (
-            <div className="empty-state">
-              <h3>
-                {activeWorkspace
-                  ? "\u958b\u59cb\u4e00\u6bb5\u65b0\u5c0d\u8a71"
-                  : "\u5148\u5efa\u7acb\u5de5\u4f5c\u5340"}
-              </h3>
-              <p>
-                {activeWorkspace
-                  ? "\u7b2c\u4e00\u53e5 User Prompt \u9001\u51fa\u5f8c\u624d\u6703\u5728\u9019\u500b Workspace \u5efa\u7acb Conversation\u3002"
-                  : "\u5de6\u5074\u8f38\u5165 Workspace Name \u4e26\u5efa\u7acb\uff0c\u518d\u958b\u59cb\u5c0d\u8a71\u3002"}
-              </p>
-            </div>
-          ) : (
-            messages.map((message) => (
-              <div key={message.id} className={`message-row ${message.role}`}>
-                <div className={`message-bubble ${message.status === "streaming" ? "streaming" : ""}`}>
-                  <div>{message.content || (message.status === "streaming" ? " " : "")}</div>
-                  {message.status === "stopped" ? (
-                    <div className="message-status">{"\u5df2\u4e2d\u65b7"}</div>
-                  ) : null}
-                  {message.status === "error" ? (
-                    <div className="message-status">{"\u767c\u751f\u932f\u8aa4"}</div>
+        {isSettingsOpen && settingsDraft && settingsWorkspace ? (
+          <>
+            <section className="messages settings-panel">
+              <div className="settings-card">
+                <div className="settings-tabs" role="tablist" aria-label="Workspace settings tabs">
+                  <button type="button" className="settings-tab active" role="tab" aria-selected="true">
+                    General
+                  </button>
+                </div>
+
+                <div className="settings-field">
+                  <label htmlFor="workspace-name-input">Workspace Name</label>
+                  <input
+                    id="workspace-name-input"
+                    value={settingsDraft.name}
+                    onChange={(nextEvent) =>
+                      setSettingsDraft((current) =>
+                        current === null ? current : { ...current, name: nextEvent.target.value },
+                      )
+                    }
+                    aria-label="Workspace Name"
+                  />
+                  {settingsValidationErrors.name ? (
+                    <div className="field-error">{settingsValidationErrors.name}</div>
                   ) : null}
                 </div>
+
+                <div className="settings-field">
+                  <label htmlFor="system-message-input">System Message</label>
+                  <textarea
+                    id="system-message-input"
+                    value={settingsDraft.systemMessage}
+                    onChange={(nextEvent) =>
+                      setSettingsDraft((current) =>
+                        current === null ? current : { ...current, systemMessage: nextEvent.target.value },
+                      )
+                    }
+                    aria-label="System Message"
+                  />
+                  {settingsValidationErrors.systemMessage ? (
+                    <div className="field-error">{settingsValidationErrors.systemMessage}</div>
+                  ) : null}
+                </div>
+
+                <div className="settings-hint">
+                  Pending settings stay local until you explicitly save them for future turns.
+                </div>
               </div>
-            ))
-          )}
-        </section>
+            </section>
 
-        <div className="composer">
-          <form className="composer-form" onSubmit={handleSubmit}>
-            <textarea
-              value={draft}
-              onChange={(nextEvent) => setDraft(nextEvent.target.value)}
-              placeholder={
-                activeWorkspace ? "\u8f38\u5165\u8a0a\u606f..." : "\u5148\u5efa\u7acb\u6216\u9078\u64c7\u5de5\u4f5c\u5340"
-              }
-              aria-label={"\u8a0a\u606f\u8f38\u5165\u6846"}
-              disabled={activeWorkspaceId === null}
-            />
-
-            <div className="composer-actions">
-              {isStreaming ? (
+            <div className="composer settings-actions">
+              <div className="settings-actions-row">
+                <button type="button" className="secondary-button" onClick={closeWorkspaceSettings}>
+                  Back to chat
+                </button>
                 <button
                   type="button"
-                  className="icon-button stop"
-                  onClick={() => void stopStreaming()}
-                  aria-label="Stop response"
+                  className="primary-button"
+                  onClick={() => void saveWorkspaceSettings()}
+                  disabled={!canSaveSettings}
                 >
-                  <StopIcon />
+                  Save settings
                 </button>
-              ) : null}
-
-              {showSendButton ? (
-                <button type="submit" className="icon-button" aria-label="Send message">
-                  <SendIcon />
-                </button>
-              ) : null}
+              </div>
             </div>
-          </form>
-        </div>
+          </>
+        ) : (
+          <>
+            <section className="messages">
+              {messages.length === 0 ? (
+                <div className="empty-state">
+                  <h3>
+                    {activeWorkspace
+                      ? "\u958b\u59cb\u4e00\u6bb5\u65b0\u5c0d\u8a71"
+                      : "\u5148\u5efa\u7acb\u5de5\u4f5c\u5340"}
+                  </h3>
+                  <p>
+                    {activeWorkspace
+                      ? "\u7b2c\u4e00\u53e5 User Prompt \u9001\u51fa\u5f8c\u624d\u6703\u5728\u9019\u500b Workspace \u5efa\u7acb Conversation\u3002"
+                      : "\u5de6\u5074\u8f38\u5165 Workspace Name \u4e26\u5efa\u7acb\uff0c\u518d\u958b\u59cb\u5c0d\u8a71\u3002"}
+                  </p>
+                </div>
+              ) : (
+                messages.map((message) => (
+                  <div key={message.id} className={`message-row ${message.role}`}>
+                    <div className={`message-bubble ${message.status === "streaming" ? "streaming" : ""}`}>
+                      <div>{message.content || (message.status === "streaming" ? " " : "")}</div>
+                      {message.status === "stopped" ? (
+                        <div className="message-status">{"\u5df2\u4e2d\u65b7"}</div>
+                      ) : null}
+                      {message.status === "error" ? (
+                        <div className="message-status">{"\u767c\u751f\u932f\u8aa4"}</div>
+                      ) : null}
+                    </div>
+                  </div>
+                ))
+              )}
+            </section>
+
+            <div className="composer">
+              <form className="composer-form" onSubmit={handleSubmit}>
+                <textarea
+                  value={draft}
+                  onChange={(nextEvent) => setDraft(nextEvent.target.value)}
+                  placeholder={
+                    activeWorkspace ? "\u8f38\u5165\u8a0a\u606f..." : "\u5148\u5efa\u7acb\u6216\u9078\u64c7\u5de5\u4f5c\u5340"
+                  }
+                  aria-label={"\u8a0a\u606f\u8f38\u5165\u6846"}
+                  disabled={activeWorkspaceId === null}
+                />
+
+                <div className="composer-actions">
+                  {isStreaming ? (
+                    <button
+                      type="button"
+                      className="icon-button stop"
+                      onClick={() => void stopStreaming()}
+                      aria-label="Stop response"
+                    >
+                      <StopIcon />
+                    </button>
+                  ) : null}
+
+                  {showSendButton ? (
+                    <button type="submit" className="icon-button" aria-label="Send message">
+                      <SendIcon />
+                    </button>
+                  ) : null}
+                </div>
+              </form>
+            </div>
+          </>
+        )}
       </main>
     </div>
   );

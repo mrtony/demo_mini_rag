@@ -29,6 +29,27 @@ class WorkspaceCreateRequest(BaseModel):
         return normalized
 
 
+class WorkspaceUpdateRequest(BaseModel):
+    name: str = Field(min_length=3, max_length=120)
+    system_message: str = Field(min_length=1)
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if len(normalized) < 3:
+            raise ValueError("Workspace Name must be at least three characters long")
+        return normalized
+
+    @field_validator("system_message")
+    @classmethod
+    def validate_system_message(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("System Message cannot be blank")
+        return normalized
+
+
 class WorkspaceSummary(BaseModel):
     workspace_id: str
     name: str

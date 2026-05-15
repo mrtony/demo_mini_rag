@@ -70,6 +70,120 @@ async def test_creates_workspace_with_default_settings_and_rejects_invalid_names
 
 
 @pytest.mark.asyncio
+async def test_updates_workspace_general_settings_and_validates_inputs(test_client):
+    workspace = await create_workspace(test_client, "Workspace Alpha")
+
+    update_response = await test_client.put(
+        f"/api/workspaces/{workspace['workspace_id']}",
+        json={
+            "name": "Workspace Renamed",
+            "system_message": "You are a focused assistant.",
+        },
+    )
+
+    assert update_response.status_code == 200
+    payload = update_response.json()
+    assert payload["workspace_id"] == workspace["workspace_id"]
+    assert payload["name"] == "Workspace Renamed"
+    assert payload["system_message"] == "You are a focused assistant."
+
+    short_name_response = await test_client.put(
+        f"/api/workspaces/{workspace['workspace_id']}",
+        json={
+            "name": "ab",
+            "system_message": "Still valid",
+        },
+    )
+    blank_system_message_response = await test_client.put(
+        f"/api/workspaces/{workspace['workspace_id']}",
+        json={
+            "name": "Workspace Valid",
+            "system_message": "   ",
+        },
+    )
+
+    assert short_name_response.status_code == 422
+    assert blank_system_message_response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_next_turn_uses_only_latest_saved_workspace_settings(test_client):
+    workspace = await create_workspace(test_client, "Workspace Settings")
+
+    class RecordingChatService:
+        configure_calls: list[dict[str, str]] = []
+
+        def configure_runtime(self, *, system_prompt: str, chat_model: str) -> None:
+            self.__class__.configure_calls.append(
+                {
+                    "system_prompt": system_prompt,
+                    "chat_model": chat_model,
+                }
+            )
+
+        async def stream_chat(self, messages, user_message):
+            yield ChatEvent(state=ChatStreamState.STARTED, response_id="resp_recording_1")
+            yield ChatEvent(state=ChatStreamState.DELTA, delta="Hello", response_id="resp_recording_1")
+            yield ChatEvent(state=ChatStreamState.COMPLETED)
+
+        async def generate_title(self, first_message: str) -> str:
+            return "Recorded title"
+
+        async def maybe_close_stream(self, stream) -> None:
+            return None
+
+    app.dependency_overrides[get_chat_service] = RecordingChatService
+    RecordingChatService.configure_calls = []
+
+    try:
+        first_response = await test_client.post(
+            "/api/chat/stream",
+            json={
+                "workspace_id": workspace["workspace_id"],
+                "conversation_id": 0,
+                "message_id": 0,
+                "message": "第一句",
+            },
+        )
+
+        first_events = parse_sse_payload(first_response.text)
+        conversation_id = first_events[0][1]["conversation_id"]
+
+        update_response = await test_client.put(
+            f"/api/workspaces/{workspace['workspace_id']}",
+            json={
+                "name": "Workspace Settings",
+                "system_message": "Only saved settings should apply.",
+            },
+        )
+        assert update_response.status_code == 200
+
+        second_response = await test_client.post(
+            "/api/chat/stream",
+            json={
+                "workspace_id": workspace["workspace_id"],
+                "conversation_id": conversation_id,
+                "message_id": 0,
+                "message": "第二句",
+            },
+        )
+
+        assert second_response.status_code == 200
+        assert RecordingChatService.configure_calls == [
+            {
+                "system_prompt": workspace["system_message"],
+                "chat_model": workspace["selected_model"]["model_id"],
+            },
+            {
+                "system_prompt": "Only saved settings should apply.",
+                "chat_model": workspace["selected_model"]["model_id"],
+            },
+        ]
+    finally:
+        app.dependency_overrides.pop(get_chat_service, None)
+
+
+@pytest.mark.asyncio
 async def test_first_prompt_creates_conversation_for_workspace_at_acceptance_time(test_client):
     workspace = await create_workspace(test_client)
 

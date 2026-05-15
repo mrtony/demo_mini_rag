@@ -10,6 +10,7 @@ import {
   listWorkspaces,
   openChatStream,
   stopConversation,
+  updateWorkspace,
 } from "./api";
 import { readSseStream } from "./lib/sse";
 
@@ -21,6 +22,7 @@ vi.mock("./api", () => ({
   listWorkspaces: vi.fn(),
   openChatStream: vi.fn(),
   stopConversation: vi.fn(),
+  updateWorkspace: vi.fn(),
   toChatBubbles: (messages: Array<{ id: number; query: string; response: string; status: string }>) =>
     messages.flatMap((message) => [
       {
@@ -52,6 +54,7 @@ const mockedListWorkspaceConversations = vi.mocked(listWorkspaceConversations);
 const mockedListWorkspaces = vi.mocked(listWorkspaces);
 const mockedOpenChatStream = vi.mocked(openChatStream);
 const mockedStopConversation = vi.mocked(stopConversation);
+const mockedUpdateWorkspace = vi.mocked(updateWorkspace);
 const mockedReadSseStream = vi.mocked(readSseStream);
 
 describe("App", () => {
@@ -63,6 +66,7 @@ describe("App", () => {
     mockedListWorkspaces.mockReset();
     mockedOpenChatStream.mockReset();
     mockedStopConversation.mockReset();
+    mockedUpdateWorkspace.mockReset();
     mockedReadSseStream.mockReset();
     mockedStopConversation.mockResolvedValue(undefined);
   });
@@ -331,5 +335,149 @@ describe("App", () => {
 
     expect(await screen.findByText("舊問題")).toBeInTheDocument();
     expect(await screen.findByText("舊回答")).toBeInTheDocument();
+  });
+
+  it("keeps general settings pending until explicit save and stays in settings after saving", async () => {
+    const user = userEvent.setup();
+
+    mockedListWorkspaces.mockResolvedValue([
+      {
+        workspace_id: "ws-settings",
+        name: "Workspace Alpha",
+        system_message: "Original system message",
+        selected_model: {
+          model_id: "gpt-5.4-nano",
+          label: "gpt-5.4-nano",
+          is_enabled: true,
+          is_default_workspace_model: true,
+        },
+        created_at: "2026-05-15T00:00:00Z",
+        updated_at: "2026-05-15T00:00:00Z",
+      },
+    ]);
+    mockedListWorkspaceConversations.mockResolvedValue([]);
+    mockedUpdateWorkspace.mockResolvedValue({
+      workspace_id: "ws-settings",
+      name: "Workspace Renamed",
+      system_message: "Saved system message",
+      selected_model: {
+        model_id: "gpt-5.4-nano",
+        label: "gpt-5.4-nano",
+        is_enabled: true,
+        is_default_workspace_model: true,
+      },
+      created_at: "2026-05-15T00:00:00Z",
+      updated_at: "2026-05-15T00:05:00Z",
+    });
+
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "Open workspace settings" }));
+    expect(await screen.findByRole("heading", { name: "Workspace Settings" })).toBeInTheDocument();
+
+    const nameInput = screen.getByLabelText("Workspace Name");
+    const systemMessageInput = screen.getByLabelText("System Message");
+
+    await user.clear(nameInput);
+    await user.type(nameInput, "Workspace Renamed");
+    await user.clear(systemMessageInput);
+    await user.type(systemMessageInput, "Saved system message");
+
+    expect(screen.getByRole("button", { name: /Workspace Alpha/ })).toBeInTheDocument();
+    expect(mockedUpdateWorkspace).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Save settings" }));
+
+    expect(mockedUpdateWorkspace).toHaveBeenCalledWith("ws-settings", {
+      name: "Workspace Renamed",
+      system_message: "Saved system message",
+    });
+    expect(await screen.findByRole("heading", { name: "Workspace Settings" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Workspace Renamed/ })).toBeInTheDocument();
+  });
+
+  it("warns before discarding pending general settings", async () => {
+    const user = userEvent.setup();
+    const confirmSpy = vi.spyOn(window, "confirm");
+
+    mockedListWorkspaces.mockResolvedValue([
+      {
+        workspace_id: "ws-alpha",
+        name: "Workspace Alpha",
+        system_message: "Alpha system",
+        selected_model: {
+          model_id: "gpt-5.4-nano",
+          label: "gpt-5.4-nano",
+          is_enabled: true,
+          is_default_workspace_model: true,
+        },
+        created_at: "2026-05-15T00:00:00Z",
+        updated_at: "2026-05-15T00:00:00Z",
+      },
+      {
+        workspace_id: "ws-beta",
+        name: "Workspace Beta",
+        system_message: "Beta system",
+        selected_model: {
+          model_id: "gpt-5.4-nano",
+          label: "gpt-5.4-nano",
+          is_enabled: true,
+          is_default_workspace_model: true,
+        },
+        created_at: "2026-05-15T00:01:00Z",
+        updated_at: "2026-05-15T00:01:00Z",
+      },
+    ]);
+    mockedListWorkspaceConversations.mockResolvedValue([]);
+
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "Open workspace settings" }));
+    await user.clear(screen.getByLabelText("Workspace Name"));
+    await user.type(screen.getByLabelText("Workspace Name"), "Workspace Draft");
+
+    confirmSpy.mockReturnValueOnce(false);
+    await user.click(screen.getByRole("button", { name: /Workspace Beta/ }));
+
+    expect(confirmSpy).toHaveBeenCalled();
+    expect(screen.getByRole("heading", { name: "Workspace Settings" })).toBeInTheDocument();
+    expect(screen.getByDisplayValue("Workspace Draft")).toBeInTheDocument();
+
+    confirmSpy.mockReturnValueOnce(true);
+    await user.click(screen.getByRole("button", { name: /Workspace Beta/ }));
+
+    expect(await screen.findByText("開始一段新對話")).toBeInTheDocument();
+    expect(screen.getByText("Workspace Beta | gpt-5.4-nano")).toBeInTheDocument();
+    confirmSpy.mockRestore();
+  });
+
+  it("validates a non-blank system message before save", async () => {
+    const user = userEvent.setup();
+
+    mockedListWorkspaces.mockResolvedValue([
+      {
+        workspace_id: "ws-settings",
+        name: "Workspace Alpha",
+        system_message: "Original system message",
+        selected_model: {
+          model_id: "gpt-5.4-nano",
+          label: "gpt-5.4-nano",
+          is_enabled: true,
+          is_default_workspace_model: true,
+        },
+        created_at: "2026-05-15T00:00:00Z",
+        updated_at: "2026-05-15T00:00:00Z",
+      },
+    ]);
+    mockedListWorkspaceConversations.mockResolvedValue([]);
+
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "Open workspace settings" }));
+    await user.clear(screen.getByLabelText("System Message"));
+    await user.type(screen.getByLabelText("System Message"), "   ");
+
+    expect(screen.getByText("System Message cannot be blank")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save settings" })).toBeDisabled();
   });
 });
