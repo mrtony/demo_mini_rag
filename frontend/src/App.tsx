@@ -957,46 +957,55 @@ export default function App() {
                   <p className="sidebar-subtitle mt-1 text-sm text-stone-600">Save a tone, model, and system prompt per workspace.</p>
                 </div>
               </div>
-              <div className="conversation-list chat-scrollbar flex min-h-0 flex-col gap-3 overflow-y-auto pr-1">
+              <div className="conversation-list chat-scrollbar flex min-h-0 flex-col overflow-y-auto pr-1">
                 {workspaces.map((workspace, index) => (
-                  <div key={workspace.workspace_id} className="workspace-row grid grid-cols-[minmax(0,1fr)_auto] gap-2">
+                  <div
+                    key={workspace.workspace_id}
+                    className="workspace-row grid grid-cols-[minmax(0,1fr)_auto] items-stretch gap-2 border-b border-stone-200/80 py-1 last:border-b-0"
+                  >
                     <button
                       type="button"
                       aria-label={`${workspace.name} ${workspace.selected_model.label}`}
                       className={cn(
-                        "conversation-item group relative flex min-w-0 flex-col gap-3 rounded-[1.5rem] border px-4 py-4 text-left transition duration-200 focus:outline-none focus:ring-4 focus:ring-rose-200/70",
+                        "conversation-item group relative flex min-w-0 items-center gap-3 px-3 py-3 text-left transition duration-200 focus:outline-none focus:ring-4 focus:ring-rose-200/70",
                         workspace.workspace_id === activeWorkspaceId
-                          ? "active border-stone-950 bg-stone-950 text-stone-50 shadow-[0_18px_36px_rgba(24,24,27,0.22)]"
-                          : "border-stone-200/80 bg-white/85 text-stone-900 hover:-translate-y-0.5 hover:border-rose-200 hover:bg-white hover:shadow-[0_18px_30px_rgba(120,53,15,0.08)]",
+                          ? "active bg-stone-950 text-stone-50"
+                          : "text-stone-900 hover:bg-white/90",
                       )}
                       onClick={() => selectWorkspace(workspace.workspace_id)}
                     >
-                      <div className="flex items-start justify-between gap-3">
-                        <strong className="truncate text-base font-semibold tracking-[-0.02em]">{workspace.name}</strong>
-                        <span
-                          className={cn(
-                            "shrink-0 rounded-full px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.12em]",
-                            workspace.workspace_id === activeWorkspaceId
-                              ? "bg-white/12 text-stone-100"
-                              : "bg-rose-50 text-rose-600",
-                          )}
-                        >
-                          Live
-                        </span>
-                      </div>
                       <span
                         className={cn(
-                          "text-sm",
-                          workspace.workspace_id === activeWorkspaceId ? "text-stone-300" : "text-stone-500",
+                          "h-10 w-1 shrink-0 rounded-full transition-colors duration-200",
+                          workspace.workspace_id === activeWorkspaceId ? "bg-rose-400" : "bg-stone-200 group-hover:bg-rose-200",
                         )}
-                      >
-                        {workspace.selected_model.label}
-                      </span>
+                      />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-3">
+                          <strong className="truncate text-[15px] font-semibold tracking-[-0.02em]">{workspace.name}</strong>
+                          <span
+                            className={cn(
+                              "shrink-0 text-[11px] font-semibold uppercase tracking-[0.14em]",
+                              workspace.workspace_id === activeWorkspaceId ? "text-stone-300" : "text-rose-500",
+                            )}
+                          >
+                            Live
+                          </span>
+                        </div>
+                        <span
+                          className={cn(
+                            "mt-1 block truncate text-xs",
+                            workspace.workspace_id === activeWorkspaceId ? "text-stone-300" : "text-stone-500",
+                          )}
+                        >
+                          {workspace.selected_model.label}
+                        </span>
+                      </div>
                     </button>
-                    <div className="workspace-actions flex flex-col gap-2">
+                    <div className="workspace-actions flex items-center gap-1 self-center">
                       <button
                         type="button"
-                        className="workspace-action-button inline-flex h-10 w-10 items-center justify-center rounded-2xl border border-stone-200 bg-white/90 text-stone-500 transition duration-200 hover:border-rose-200 hover:text-rose-500 disabled:cursor-not-allowed disabled:opacity-40"
+                        className="workspace-action-button inline-flex h-8 w-8 items-center justify-center rounded-xl text-stone-500 transition duration-200 hover:bg-stone-200/80 hover:text-rose-500 disabled:cursor-not-allowed disabled:opacity-40"
                         onClick={() => void handleMoveWorkspace(workspace.workspace_id, -1)}
                         aria-label={`Move up ${workspace.name}`}
                         disabled={index === 0}
@@ -1005,7 +1014,7 @@ export default function App() {
                       </button>
                       <button
                         type="button"
-                        className="workspace-action-button inline-flex h-10 w-10 items-center justify-center rounded-2xl border border-stone-200 bg-white/90 text-stone-500 transition duration-200 hover:border-rose-200 hover:text-rose-500 disabled:cursor-not-allowed disabled:opacity-40"
+                        className="workspace-action-button inline-flex h-8 w-8 items-center justify-center rounded-xl text-stone-500 transition duration-200 hover:bg-stone-200/80 hover:text-rose-500 disabled:cursor-not-allowed disabled:opacity-40"
                         onClick={() => void handleMoveWorkspace(workspace.workspace_id, 1)}
                         aria-label={`Move down ${workspace.name}`}
                         disabled={index === workspaces.length - 1}
@@ -1014,7 +1023,7 @@ export default function App() {
                       </button>
                       <button
                         type="button"
-                        className="workspace-action-button warn inline-flex h-10 w-10 items-center justify-center rounded-2xl border border-stone-200 bg-white/90 text-amber-700 transition duration-200 hover:border-amber-200 hover:bg-amber-50"
+                        className="workspace-action-button warn inline-flex h-8 w-8 items-center justify-center rounded-xl text-amber-700 transition duration-200 hover:bg-amber-100/80"
                         onClick={() => void handleArchiveWorkspace(workspace.workspace_id)}
                         aria-label={`Archive ${workspace.name}`}
                       >
@@ -1036,22 +1045,28 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="conversation-list chat-scrollbar flex max-h-52 flex-col gap-3 overflow-y-auto pr-1">
+              <div className="conversation-list chat-scrollbar flex max-h-52 flex-col overflow-y-auto pr-1">
                 {archivedWorkspaces.length === 0 ? (
                   <div className="sidebar-empty rounded-[1.25rem] border border-dashed border-stone-300 bg-white/70 px-4 py-5 text-sm text-stone-500">
                     No archived workspaces
                   </div>
                 ) : (
                   archivedWorkspaces.map((workspace) => (
-                    <div key={workspace.workspace_id} className="workspace-row archived grid grid-cols-[minmax(0,1fr)_auto] gap-2">
-                      <div className="conversation-item archived flex min-w-0 flex-col gap-2 rounded-[1.5rem] border border-stone-200 bg-white/85 px-4 py-4 text-left text-stone-700">
-                        <strong className="truncate text-sm font-semibold tracking-[-0.01em]">{workspace.name}</strong>
-                        <span className="text-xs text-stone-500">{workspace.selected_model.label}</span>
+                    <div
+                      key={workspace.workspace_id}
+                      className="workspace-row archived grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2 border-b border-stone-200/70 py-1 last:border-b-0"
+                    >
+                      <div className="conversation-item archived flex min-w-0 items-center gap-3 px-3 py-3 text-left text-stone-700">
+                        <span className="h-8 w-1 shrink-0 rounded-full bg-stone-300" />
+                        <div className="min-w-0">
+                          <strong className="truncate text-sm font-semibold tracking-[-0.01em]">{workspace.name}</strong>
+                          <span className="mt-1 block truncate text-xs text-stone-500">{workspace.selected_model.label}</span>
+                        </div>
                       </div>
-                      <div className="workspace-actions flex flex-col gap-2">
+                      <div className="workspace-actions flex items-center gap-2">
                         <button
                           type="button"
-                          className="workspace-action-button inline-flex min-h-10 items-center justify-center rounded-2xl border border-stone-200 bg-white/90 px-3 text-sm font-medium text-stone-700 transition duration-200 hover:border-rose-200 hover:text-rose-500"
+                          className="workspace-action-button inline-flex min-h-8 items-center justify-center rounded-xl px-2.5 text-sm font-medium text-stone-700 transition duration-200 hover:bg-white/90 hover:text-rose-500"
                           onClick={() => void handleRestoreWorkspace(workspace.workspace_id)}
                           aria-label={`Restore ${workspace.name}`}
                         >
@@ -1086,42 +1101,57 @@ export default function App() {
                 </button>
               </div>
 
-              <div className="conversation-list chat-scrollbar flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto pr-1">
+              <div className="conversation-list chat-scrollbar flex min-h-0 flex-1 flex-col overflow-y-auto pr-1">
                 {visibleConversations.length === 0 ? (
                   <div className="rounded-[1.25rem] border border-dashed border-stone-300 bg-stone-50/80 px-4 py-5 text-sm text-stone-500">
                     No conversations yet
                   </div>
                 ) : null}
                 {visibleConversations.map((conversation) => (
-                  <div key={conversation.conversation_id} className="conversation-row grid grid-cols-[minmax(0,1fr)_auto] gap-2">
+                  <div
+                    key={conversation.conversation_id}
+                    className="conversation-row grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2 border-b border-stone-200/80 py-1 last:border-b-0"
+                  >
                     <button
                       type="button"
                       aria-label={conversation.conversation_title}
                       className={cn(
-                        "conversation-item flex min-w-0 flex-col gap-3 rounded-[1.5rem] border px-4 py-4 text-left transition duration-200 focus:outline-none focus:ring-4 focus:ring-rose-200/70",
+                        "conversation-item flex min-w-0 items-center gap-3 px-3 py-3 text-left transition duration-200 focus:outline-none focus:ring-4 focus:ring-rose-200/70",
                         conversation.conversation_id === activeConversationId
-                          ? "active border-rose-200 bg-rose-50/80 shadow-[0_16px_30px_rgba(244,63,94,0.08)]"
-                          : "border-stone-200/80 bg-white/85 hover:-translate-y-0.5 hover:border-rose-200 hover:bg-white",
+                          ? "active bg-rose-50/90"
+                          : "hover:bg-white/90",
                       )}
                       onClick={() => void loadConversation(conversation.conversation_id)}
                     >
-                      <div className="conversation-item-header flex items-start justify-between gap-3">
-                        <strong className="truncate text-sm font-semibold tracking-[-0.01em] text-stone-900">
-                          {conversation.conversation_title}
-                        </strong>
-                        {conversation.conversation_id === streamingConversationId ? (
-                          <span className="conversation-activity-badge inline-flex shrink-0 items-center gap-2 rounded-full bg-stone-950 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-stone-50">
-                            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-rose-400" />
-                            Streaming
-                          </span>
-                        ) : null}
+                      <span
+                        className={cn(
+                          "h-8 w-1 shrink-0 rounded-full transition-colors duration-200",
+                          conversation.conversation_id === activeConversationId
+                            ? "bg-rose-400"
+                            : conversation.conversation_id === streamingConversationId
+                              ? "bg-stone-900"
+                              : "bg-stone-200",
+                        )}
+                      />
+                      <div className="min-w-0 flex-1">
+                        <div className="conversation-item-header flex items-center justify-between gap-3">
+                          <strong className="truncate text-sm font-semibold tracking-[-0.01em] text-stone-900">
+                            {conversation.conversation_title}
+                          </strong>
+                          {conversation.conversation_id === streamingConversationId ? (
+                            <span className="conversation-activity-badge inline-flex shrink-0 items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-stone-700">
+                              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-rose-400" />
+                              Streaming
+                            </span>
+                          ) : null}
+                        </div>
+                        <span className="mt-1 block text-xs text-stone-500">{formatTime(conversation.updated_at)}</span>
                       </div>
-                      <span className="text-xs text-stone-500">{formatTime(conversation.updated_at)}</span>
                     </button>
-                    <div className="conversation-actions flex flex-col gap-2">
+                    <div className="conversation-actions flex items-center gap-2">
                       <button
                         type="button"
-                        className="workspace-action-button warn inline-flex min-h-10 items-center justify-center rounded-2xl border border-stone-200 bg-white/90 px-3 text-sm font-medium text-rose-700 transition duration-200 hover:border-rose-200 hover:bg-rose-50"
+                        className="workspace-action-button warn inline-flex min-h-8 items-center justify-center rounded-xl px-2.5 text-sm font-medium text-rose-700 transition duration-200 hover:bg-rose-50"
                         onClick={() =>
                           void handleDeleteConversation(
                             conversation.conversation_id,
