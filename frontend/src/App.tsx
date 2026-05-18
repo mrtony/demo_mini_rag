@@ -19,7 +19,15 @@ import {
   toChatBubbles,
   updateWorkspace,
 } from "./api";
-import { PlusIcon, SendIcon, StopIcon } from "./components/Icons";
+import {
+  ArchiveBoxIcon,
+  ChevronDownIcon,
+  ChevronUpIcon,
+  PlusIcon,
+  SendIcon,
+  SlidersIcon,
+  StopIcon,
+} from "./components/Icons";
 import { readSseStream } from "./lib/sse";
 import type {
   ChatBubble,
@@ -195,6 +203,10 @@ function hasValidationErrors(errors: SettingsValidationErrors): boolean {
       errors.selectedModelId ||
       Object.keys(errors.modelSettings).length > 0,
   );
+}
+
+function cn(...values: Array<string | false | null | undefined>): string {
+  return values.filter(Boolean).join(" ");
 }
 
 
@@ -882,421 +894,669 @@ export default function App() {
   }
 
   return (
-    <div className="app-shell">
-      <aside className="sidebar">
-        <div className="sidebar-header">
-          <div>
-            <h1 className="sidebar-title">{"\u5de5\u4f5c\u5340"}</h1>
-            <p className="sidebar-subtitle">Workspace-owned chat</p>
-          </div>
-        </div>
-
-        <form className="composer-form" onSubmit={handleCreateWorkspace}>
-          <textarea
-            value={newWorkspaceName}
-            onChange={(nextEvent) => setNewWorkspaceName(nextEvent.target.value)}
-            placeholder={"\u8f38\u5165\u5de5\u4f5c\u5340\u540d\u7a31"}
-            aria-label={"\u5de5\u4f5c\u5340\u540d\u7a31"}
-          />
-          <div className="composer-actions">
-            <button type="submit" className="icon-button" aria-label={"\u5efa\u7acb\u5de5\u4f5c\u5340"}>
-              <PlusIcon />
-            </button>
-          </div>
-        </form>
-        <div className="workspace-default-model" aria-live="polite">
-          <span>預設模型</span>
-          <strong>{defaultWorkspaceModel?.label ?? "載入中..."}</strong>
-        </div>
-
-        <div className="conversation-list">
-          {workspaces.map((workspace, index) => (
-            <div key={workspace.workspace_id} className="workspace-row">
-              <button
-                type="button"
-                className={`conversation-item${workspace.workspace_id === activeWorkspaceId ? " active" : ""}`}
-                onClick={() => selectWorkspace(workspace.workspace_id)}
-              >
-                <strong>{workspace.name}</strong>
-                <span>{workspace.selected_model.label}</span>
-              </button>
-              <div className="workspace-actions">
-                <button
-                  type="button"
-                  className="workspace-action-button"
-                  onClick={() => void handleMoveWorkspace(workspace.workspace_id, -1)}
-                  aria-label={`Move up ${workspace.name}`}
-                  disabled={index === 0}
-                >
-                  ↑
-                </button>
-                <button
-                  type="button"
-                  className="workspace-action-button"
-                  onClick={() => void handleMoveWorkspace(workspace.workspace_id, 1)}
-                  aria-label={`Move down ${workspace.name}`}
-                  disabled={index === workspaces.length - 1}
-                >
-                  ↓
-                </button>
-                <button
-                  type="button"
-                  className="workspace-action-button warn"
-                  onClick={() => void handleArchiveWorkspace(workspace.workspace_id)}
-                  aria-label={`Archive ${workspace.name}`}
-                >
-                  Archive
-                </button>
+    <div className="app-shell min-h-screen px-4 py-4 text-stone-950 md:px-6 md:py-6">
+      <div className="mx-auto grid max-w-[1600px] gap-4 lg:grid-cols-[22rem_minmax(0,1fr)]">
+        <aside className="sidebar flex max-h-[calc(100vh-2rem)] min-h-[720px] flex-col overflow-hidden rounded-[2rem] border border-white/70 bg-[rgba(255,250,245,0.86)] p-4 shadow-[0_28px_90px_rgba(41,37,36,0.12)] backdrop-blur-xl">
+          <div className="sidebar-header mb-4">
+            <div className="space-y-2">
+              <div className="inline-flex items-center rounded-full border border-stone-900/10 bg-stone-900 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.24em] text-stone-50">
+                Workspace Console
+              </div>
+              <div>
+                <h1 className="sidebar-title font-['Iowan_Old_Style','Palatino_Linotype','Noto_Serif_TC',serif] text-3xl font-semibold tracking-[-0.03em] text-stone-950">
+                  {"\u5de5\u4f5c\u5340"}
+                </h1>
+                <p className="sidebar-subtitle mt-1 text-sm text-stone-600">
+                  Anything-LLM style workspace chat with streaming responses
+                </p>
               </div>
             </div>
-          ))}
-        </div>
+          </div>
 
-        <div className="sidebar-section">
-          <div className="sidebar-header">
-            <div>
-              <h2 className="sidebar-title">Archived Workspaces</h2>
-              <p className="sidebar-subtitle">Restore before using them again</p>
+          <div className="rounded-[1.75rem] border border-white/80 bg-white/80 p-4 shadow-[0_14px_30px_rgba(28,25,23,0.06)]">
+            <form className="composer-form flex items-end gap-3" onSubmit={handleCreateWorkspace}>
+              <div className="min-w-0 flex-1">
+                <label
+                  htmlFor="new-workspace-name"
+                  className="mb-2 block text-[11px] font-semibold uppercase tracking-[0.18em] text-stone-500"
+                >
+                  {"\u65b0\u5de5\u4f5c\u5340"}
+                </label>
+                <input
+                  id="new-workspace-name"
+                  className="w-full rounded-[1.25rem] border border-stone-200 bg-stone-50 px-4 py-3 text-sm text-stone-900 outline-none transition duration-200 placeholder:text-stone-400 focus:border-rose-300 focus:bg-white focus:ring-4 focus:ring-rose-200/60"
+                  value={newWorkspaceName}
+                  onChange={(nextEvent) => setNewWorkspaceName(nextEvent.target.value)}
+                  placeholder={"\u8f38\u5165\u5de5\u4f5c\u5340\u540d\u7a31"}
+                  aria-label={"\u5de5\u4f5c\u5340\u540d\u7a31"}
+                />
+              </div>
+              <div className="composer-actions shrink-0">
+                <button
+                  type="submit"
+                  className="icon-button inline-flex h-12 w-12 items-center justify-center rounded-2xl bg-stone-950 text-white shadow-[0_16px_30px_rgba(24,24,27,0.22)] transition duration-200 hover:-translate-y-0.5 hover:bg-rose-500 focus:outline-none focus:ring-4 focus:ring-rose-200/70"
+                  aria-label={"\u5efa\u7acb\u5de5\u4f5c\u5340"}
+                >
+                  <PlusIcon className="h-5 w-5" />
+                </button>
+              </div>
+            </form>
+            <div className="workspace-default-model mt-4 flex items-center justify-between gap-3 rounded-[1.25rem] border border-stone-200/80 bg-[#f6efe6] px-4 py-3 text-sm text-stone-700" aria-live="polite">
+              <span className="text-stone-500">預設模型</span>
+              <strong className="font-medium text-stone-950">{defaultWorkspaceModel?.label ?? "載入中..."}</strong>
             </div>
           </div>
 
-          <div className="conversation-list">
-            {archivedWorkspaces.length === 0 ? (
-              <div className="sidebar-empty">No archived workspaces</div>
-            ) : (
-              archivedWorkspaces.map((workspace) => (
-                <div key={workspace.workspace_id} className="workspace-row archived">
-                  <div className="conversation-item archived">
-                    <strong>{workspace.name}</strong>
-                    <span>{workspace.selected_model.label}</span>
-                  </div>
-                  <div className="workspace-actions">
+          <div className="mt-4 flex min-h-0 flex-1 flex-col gap-4">
+            <section className="sidebar-section flex min-h-0 flex-col rounded-[1.75rem] border border-white/70 bg-white/70 p-3 shadow-[0_10px_25px_rgba(28,25,23,0.05)]">
+              <div className="sidebar-header mb-3 px-2">
+                <div>
+                  <h2 className="sidebar-title text-sm font-semibold uppercase tracking-[0.16em] text-stone-500">
+                    Workspaces
+                  </h2>
+                  <p className="sidebar-subtitle mt-1 text-sm text-stone-600">Save a tone, model, and system prompt per workspace.</p>
+                </div>
+              </div>
+              <div className="conversation-list chat-scrollbar flex min-h-0 flex-col overflow-y-auto pr-1">
+                {workspaces.map((workspace, index) => (
+                  <div
+                    key={workspace.workspace_id}
+                    className="workspace-row grid grid-cols-[minmax(0,1fr)_auto] items-stretch gap-2 border-b border-stone-200/80 py-1 last:border-b-0"
+                  >
                     <button
                       type="button"
-                      className="workspace-action-button"
-                      onClick={() => void handleRestoreWorkspace(workspace.workspace_id)}
-                      aria-label={`Restore ${workspace.name}`}
+                      aria-label={`${workspace.name} ${workspace.selected_model.label}`}
+                      className={cn(
+                        "conversation-item group relative flex min-w-0 items-center gap-3 px-3 py-3 text-left transition duration-200 focus:outline-none focus:ring-4 focus:ring-rose-200/70",
+                        workspace.workspace_id === activeWorkspaceId
+                          ? "active bg-stone-950 text-stone-50"
+                          : "text-stone-900 hover:bg-white/90",
+                      )}
+                      onClick={() => selectWorkspace(workspace.workspace_id)}
                     >
-                      Restore
-                    </button>
-                  </div>
-                </div>
-              ))
-            )}
-          </div>
-        </div>
-
-        <div className="sidebar-header">
-          <div>
-            <h2 className="sidebar-title">{"\u5c0d\u8a71"}</h2>
-            <p className="sidebar-subtitle">
-              {activeWorkspace ? activeWorkspace.name : "\u5148\u5efa\u7acb\u6216\u9078\u64c7\u5de5\u4f5c\u5340"}
-            </p>
-          </div>
-          <button
-            type="button"
-            className="new-chat-button"
-            onClick={startNewConversation}
-            aria-label={"\u65b0\u589e\u5c0d\u8a71"}
-            title={"\u65b0\u589e\u5c0d\u8a71"}
-            disabled={activeWorkspaceId === null || isStreamInFlight}
-          >
-            <PlusIcon />
-          </button>
-        </div>
-
-        <div className="conversation-list">
-          {visibleConversations.map((conversation) => (
-            <div key={conversation.conversation_id} className="conversation-row">
-              <button
-                type="button"
-                className={`conversation-item${
-                  conversation.conversation_id === activeConversationId ? " active" : ""
-                }`}
-                onClick={() => void loadConversation(conversation.conversation_id)}
-              >
-                <div className="conversation-item-header">
-                  <strong>{conversation.conversation_title}</strong>
-                  {conversation.conversation_id === streamingConversationId ? (
-                    <span className="conversation-activity-badge">Streaming</span>
-                  ) : null}
-                </div>
-                <span>{formatTime(conversation.updated_at)}</span>
-              </button>
-              <div className="conversation-actions">
-                <button
-                  type="button"
-                  className="workspace-action-button warn"
-                  onClick={() =>
-                    void handleDeleteConversation(
-                      conversation.conversation_id,
-                      conversation.conversation_title,
-                    )
-                  }
-                  aria-label={`Delete ${conversation.conversation_title}`}
-                >
-                  Delete
-                </button>
-              </div>
-            </div>
-          ))}
-        </div>
-      </aside>
-
-      <main className="chat-panel">
-        <div className="chat-header">
-          <div className="chat-header-row">
-            <div>
-              <h2>{isSettingsOpen ? "Workspace Settings" : activeTitle}</h2>
-              <p>
-                {activeWorkspace
-                  ? `${activeWorkspace.name} | ${activeWorkspace.selected_model.label}`
-                  : "Create a Workspace before starting a Conversation."}
-              </p>
-            </div>
-            {activeWorkspace ? (
-              <button
-                type="button"
-                className="secondary-button"
-                onClick={isSettingsOpen ? closeWorkspaceSettings : openWorkspaceSettings}
-                aria-label={isSettingsOpen ? "Back to chat" : "Open workspace settings"}
-              >
-                {isSettingsOpen ? "Back to chat" : "Settings"}
-              </button>
-            ) : null}
-          </div>
-        </div>
-
-        {errorMessage ? <div className="error-banner">{errorMessage}</div> : null}
-
-        {isSettingsOpen && settingsDraft && settingsWorkspace ? (
-          <>
-            <section className="messages settings-panel">
-              <div className="settings-card">
-                <div className="settings-tabs" role="tablist" aria-label="Workspace settings tabs">
-                  <button
-                    type="button"
-                    className={`settings-tab${activeSettingsTab === "general" ? " active" : ""}`}
-                    role="tab"
-                    aria-selected={activeSettingsTab === "general"}
-                    onClick={() => setActiveSettingsTab("general")}
-                  >
-                    General
-                  </button>
-                  <button
-                    type="button"
-                    className={`settings-tab${activeSettingsTab === "model" ? " active" : ""}`}
-                    role="tab"
-                    aria-selected={activeSettingsTab === "model"}
-                    onClick={() => setActiveSettingsTab("model")}
-                  >
-                    Model
-                  </button>
-                </div>
-
-                {activeSettingsTab === "general" ? (
-                  <>
-                    <div className="settings-field">
-                      <label htmlFor="workspace-name-input">Workspace Name</label>
-                      <input
-                        id="workspace-name-input"
-                        value={settingsDraft.name}
-                        onChange={(nextEvent) =>
-                          setSettingsDraft((current) =>
-                            current === null ? current : { ...current, name: nextEvent.target.value },
-                          )
-                        }
-                        aria-label="Workspace Name"
+                      <span
+                        className={cn(
+                          "h-10 w-1 shrink-0 rounded-full transition-colors duration-200",
+                          workspace.workspace_id === activeWorkspaceId ? "bg-rose-400" : "bg-stone-200 group-hover:bg-rose-200",
+                        )}
                       />
-                      {settingsValidationErrors.name ? (
-                        <div className="field-error">{settingsValidationErrors.name}</div>
-                      ) : null}
-                    </div>
-
-                    <div className="settings-field">
-                      <label htmlFor="system-message-input">System Message</label>
-                      <textarea
-                        id="system-message-input"
-                        value={settingsDraft.systemMessage}
-                        onChange={(nextEvent) =>
-                          setSettingsDraft((current) =>
-                            current === null ? current : { ...current, systemMessage: nextEvent.target.value },
-                          )
-                        }
-                        aria-label="System Message"
-                      />
-                      {settingsValidationErrors.systemMessage ? (
-                        <div className="field-error">{settingsValidationErrors.systemMessage}</div>
-                      ) : null}
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    <div className="settings-field">
-                      <label htmlFor="selected-model-input">Selected Model</label>
-                      <select
-                        id="selected-model-input"
-                        value={settingsDraft.selectedModelId}
-                        onChange={(nextEvent) => updateSelectedModel(nextEvent.target.value)}
-                        aria-label="Selected Model"
-                      >
-                        {selectedModelOptionMissing ? (
-                          <option value={settingsDraft.selectedModelId}>
-                            {settingsWorkspace.selected_model.label} (disabled)
-                          </option>
-                        ) : null}
-                        {modelCatalog.map((model) => (
-                          <option key={model.model_id} value={model.model_id}>
-                            {model.label}
-                          </option>
-                        ))}
-                      </select>
-                      {settingsValidationErrors.selectedModelId ? (
-                        <div className="field-error">{settingsValidationErrors.selectedModelId}</div>
-                      ) : null}
-                    </div>
-
-                    {settingsSelectedModel ? (
-                      Object.entries(settingsSelectedModel.settings_schema).map(([settingKey, schema]) => (
-                        <div key={settingKey} className="settings-field">
-                          <label htmlFor={`model-setting-${settingKey}`}>{schema.label}</label>
-                          {schema.type === "number" ? (
-                            <input
-                              id={`model-setting-${settingKey}`}
-                              type="number"
-                              min={schema.min}
-                              max={schema.max}
-                              step={schema.step ?? 0.1}
-                              value={String(settingsDraft.modelSettings[settingKey] ?? "")}
-                              onChange={(nextEvent) => updateModelSetting(settingKey, schema, nextEvent.target.value)}
-                              aria-label={schema.label}
-                            />
-                          ) : (
-                            <select
-                              id={`model-setting-${settingKey}`}
-                              value={String(settingsDraft.modelSettings[settingKey] ?? "")}
-                              onChange={(nextEvent) => updateModelSetting(settingKey, schema, nextEvent.target.value)}
-                              aria-label={schema.label}
-                            >
-                              {(schema.options ?? []).map((option) => (
-                                <option key={option.value} value={option.value}>
-                                  {option.label}
-                                </option>
-                              ))}
-                            </select>
-                          )}
-                          {schema.help_text ? <div className="settings-hint">{schema.help_text}</div> : null}
-                          {settingsValidationErrors.modelSettings[settingKey] ? (
-                            <div className="field-error">{settingsValidationErrors.modelSettings[settingKey]}</div>
-                          ) : null}
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-3">
+                          <strong className="truncate text-[15px] font-semibold tracking-[-0.02em]">{workspace.name}</strong>
+                          <span
+                            className={cn(
+                              "shrink-0 text-[11px] font-semibold uppercase tracking-[0.14em]",
+                              workspace.workspace_id === activeWorkspaceId ? "text-stone-300" : "text-rose-500",
+                            )}
+                          >
+                            Live
+                          </span>
                         </div>
-                      ))
-                    ) : (
-                      <div className="settings-hint">
-                        Select an enabled model to review the available Model-specific Settings.
+                        <span
+                          className={cn(
+                            "mt-1 block truncate text-xs",
+                            workspace.workspace_id === activeWorkspaceId ? "text-stone-300" : "text-stone-500",
+                          )}
+                        >
+                          {workspace.selected_model.label}
+                        </span>
                       </div>
-                    )}
-                  </>
-                )}
-
-                <div className="settings-hint">
-                  Pending settings stay local until you explicitly save them for future turns.
-                </div>
+                    </button>
+                    <div className="workspace-actions flex items-center gap-1 self-center">
+                      <button
+                        type="button"
+                        className="workspace-action-button inline-flex h-8 w-8 items-center justify-center rounded-xl text-stone-500 transition duration-200 hover:bg-stone-200/80 hover:text-rose-500 disabled:cursor-not-allowed disabled:opacity-40"
+                        onClick={() => void handleMoveWorkspace(workspace.workspace_id, -1)}
+                        aria-label={`Move up ${workspace.name}`}
+                        disabled={index === 0}
+                      >
+                        <ChevronUpIcon className="h-4 w-4" />
+                      </button>
+                      <button
+                        type="button"
+                        className="workspace-action-button inline-flex h-8 w-8 items-center justify-center rounded-xl text-stone-500 transition duration-200 hover:bg-stone-200/80 hover:text-rose-500 disabled:cursor-not-allowed disabled:opacity-40"
+                        onClick={() => void handleMoveWorkspace(workspace.workspace_id, 1)}
+                        aria-label={`Move down ${workspace.name}`}
+                        disabled={index === workspaces.length - 1}
+                      >
+                        <ChevronDownIcon className="h-4 w-4" />
+                      </button>
+                      <button
+                        type="button"
+                        className="workspace-action-button warn inline-flex h-8 w-8 items-center justify-center rounded-xl text-amber-700 transition duration-200 hover:bg-amber-100/80"
+                        onClick={() => void handleArchiveWorkspace(workspace.workspace_id)}
+                        aria-label={`Archive ${workspace.name}`}
+                      >
+                        <ArchiveBoxIcon className="h-4 w-4" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
               </div>
             </section>
 
-            <div className="composer settings-actions">
-              <div className="settings-actions-row">
-                <button type="button" className="secondary-button" onClick={closeWorkspaceSettings}>
-                  Back to chat
-                </button>
-                <button
-                  type="button"
-                  className="primary-button"
-                  onClick={() => void saveWorkspaceSettings()}
-                  disabled={!canSaveSettings}
-                >
-                  Save settings
-                </button>
+            <section className="sidebar-section rounded-[1.75rem] border border-dashed border-stone-300/80 bg-stone-50/70 p-3">
+              <div className="sidebar-header mb-3 px-2">
+                <div>
+                  <h2 className="sidebar-title text-sm font-semibold uppercase tracking-[0.16em] text-stone-500">
+                    Archived Workspaces
+                  </h2>
+                  <p className="sidebar-subtitle mt-1 text-sm text-stone-600">Restore before using them again</p>
+                </div>
               </div>
-            </div>
-          </>
-        ) : (
-          <>
-            <section className="messages">
-              {activeMessages.length === 0 ? (
-                <div className="empty-state">
-                  <h3>
-                    {activeWorkspace
-                      ? isGenerationBlocked
-                        ? "這個 Workspace 目前無法送出新對話"
-                        : "\u958b\u59cb\u4e00\u6bb5\u65b0\u5c0d\u8a71"
-                      : "\u5148\u5efa\u7acb\u5de5\u4f5c\u5340"}
-                  </h3>
-                  <p>
-                    {activeWorkspace
-                      ? isGenerationBlocked
-                        ? "Selected Model is disabled for new generation. Open Workspace Settings and choose an enabled model."
-                        : "\u7b2c\u4e00\u53e5 User Prompt \u9001\u51fa\u5f8c\u624d\u6703\u5728\u9019\u500b Workspace \u5efa\u7acb Conversation\u3002"
-                      : "\u5de6\u5074\u8f38\u5165 Workspace Name \u4e26\u5efa\u7acb\uff0c\u518d\u958b\u59cb\u5c0d\u8a71\u3002"}
+
+              <div className="conversation-list chat-scrollbar flex max-h-52 flex-col overflow-y-auto pr-1">
+                {archivedWorkspaces.length === 0 ? (
+                  <div className="sidebar-empty rounded-[1.25rem] border border-dashed border-stone-300 bg-white/70 px-4 py-5 text-sm text-stone-500">
+                    No archived workspaces
+                  </div>
+                ) : (
+                  archivedWorkspaces.map((workspace) => (
+                    <div
+                      key={workspace.workspace_id}
+                      className="workspace-row archived grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2 border-b border-stone-200/70 py-1 last:border-b-0"
+                    >
+                      <div className="conversation-item archived flex min-w-0 items-center gap-3 px-3 py-3 text-left text-stone-700">
+                        <span className="h-8 w-1 shrink-0 rounded-full bg-stone-300" />
+                        <div className="min-w-0">
+                          <strong className="truncate text-sm font-semibold tracking-[-0.01em]">{workspace.name}</strong>
+                          <span className="mt-1 block truncate text-xs text-stone-500">{workspace.selected_model.label}</span>
+                        </div>
+                      </div>
+                      <div className="workspace-actions flex items-center gap-2">
+                        <button
+                          type="button"
+                          className="workspace-action-button inline-flex min-h-8 items-center justify-center rounded-xl px-2.5 text-sm font-medium text-stone-700 transition duration-200 hover:bg-white/90 hover:text-rose-500"
+                          onClick={() => void handleRestoreWorkspace(workspace.workspace_id)}
+                          aria-label={`Restore ${workspace.name}`}
+                        >
+                          Restore
+                        </button>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </section>
+
+            <section className="sidebar-section flex min-h-0 flex-1 flex-col rounded-[1.75rem] border border-white/70 bg-white/70 p-3 shadow-[0_10px_25px_rgba(28,25,23,0.05)]">
+              <div className="sidebar-header mb-3 px-2">
+                <div>
+                  <h2 className="sidebar-title text-sm font-semibold uppercase tracking-[0.16em] text-stone-500">
+                    {"\u5c0d\u8a71"}
+                  </h2>
+                  <p className="sidebar-subtitle mt-1 text-sm text-stone-600">
+                    {activeWorkspace ? activeWorkspace.name : "\u5148\u5efa\u7acb\u6216\u9078\u64c7\u5de5\u4f5c\u5340"}
                   </p>
                 </div>
-              ) : (
-                activeMessages.map((message) => (
-                  <div key={message.id} className={`message-row ${message.role}`}>
-                    <div className={`message-bubble ${message.status === "streaming" ? "streaming" : ""}`}>
-                      <div>{message.content || (message.status === "streaming" ? " " : "")}</div>
-                      {message.status === "stopped" ? (
-                        <div className="message-status">{"\u5df2\u4e2d\u65b7"}</div>
-                      ) : null}
-                      {message.status === "error" ? (
-                        <div className="message-status">{"\u767c\u751f\u932f\u8aa4"}</div>
-                      ) : null}
-                    </div>
+                <button
+                  type="button"
+                  className="new-chat-button inline-flex h-11 w-11 items-center justify-center rounded-2xl border border-stone-200 bg-white text-stone-900 transition duration-200 hover:-translate-y-0.5 hover:border-rose-200 hover:text-rose-500 disabled:cursor-not-allowed disabled:opacity-45"
+                  onClick={startNewConversation}
+                  aria-label={"\u65b0\u589e\u5c0d\u8a71"}
+                  title={"\u65b0\u589e\u5c0d\u8a71"}
+                  disabled={activeWorkspaceId === null || isStreamInFlight}
+                >
+                  <PlusIcon className="h-5 w-5" />
+                </button>
+              </div>
+
+              <div className="conversation-list chat-scrollbar flex min-h-0 flex-1 flex-col overflow-y-auto pr-1">
+                {visibleConversations.length === 0 ? (
+                  <div className="rounded-[1.25rem] border border-dashed border-stone-300 bg-stone-50/80 px-4 py-5 text-sm text-stone-500">
+                    No conversations yet
                   </div>
-                ))
-              )}
-            </section>
-
-            <div className="composer">
-              <form className="composer-form" onSubmit={handleSubmit}>
-                <textarea
-                  value={draft}
-                  onChange={(nextEvent) => setDraft(nextEvent.target.value)}
-                  placeholder={
-                    activeWorkspace
-                      ? isGenerationBlocked
-                        ? "請先在 Workspace Settings 選擇可用模型"
-                        : "\u8f38\u5165\u8a0a\u606f..."
-                      : "\u5148\u5efa\u7acb\u6216\u9078\u64c7\u5de5\u4f5c\u5340"
-                  }
-                  aria-label={"\u8a0a\u606f\u8f38\u5165\u6846"}
-                  disabled={activeWorkspaceId === null || isGenerationBlocked}
-                />
-
-                <div className="composer-actions">
-                  {showStopButton ? (
+                ) : null}
+                {visibleConversations.map((conversation) => (
+                  <div
+                    key={conversation.conversation_id}
+                    className="conversation-row grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2 border-b border-stone-200/80 py-1 last:border-b-0"
+                  >
                     <button
                       type="button"
-                      className="icon-button stop"
-                      onClick={() => void stopStreaming()}
-                      aria-label="Stop response"
+                      aria-label={conversation.conversation_title}
+                      className={cn(
+                        "conversation-item flex min-w-0 items-center gap-3 px-3 py-3 text-left transition duration-200 focus:outline-none focus:ring-4 focus:ring-rose-200/70",
+                        conversation.conversation_id === activeConversationId
+                          ? "active bg-rose-50/90"
+                          : "hover:bg-white/90",
+                      )}
+                      onClick={() => void loadConversation(conversation.conversation_id)}
                     >
-                      <StopIcon />
+                      <span
+                        className={cn(
+                          "h-8 w-1 shrink-0 rounded-full transition-colors duration-200",
+                          conversation.conversation_id === activeConversationId
+                            ? "bg-rose-400"
+                            : conversation.conversation_id === streamingConversationId
+                              ? "bg-stone-900"
+                              : "bg-stone-200",
+                        )}
+                      />
+                      <div className="min-w-0 flex-1">
+                        <div className="conversation-item-header flex items-center justify-between gap-3">
+                          <strong className="truncate text-sm font-semibold tracking-[-0.01em] text-stone-900">
+                            {conversation.conversation_title}
+                          </strong>
+                          {conversation.conversation_id === streamingConversationId ? (
+                            <span className="conversation-activity-badge inline-flex shrink-0 items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-stone-700">
+                              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-rose-400" />
+                              Streaming
+                            </span>
+                          ) : null}
+                        </div>
+                        <span className="mt-1 block text-xs text-stone-500">{formatTime(conversation.updated_at)}</span>
+                      </div>
                     </button>
-                  ) : null}
+                    <div className="conversation-actions flex items-center gap-2">
+                      <button
+                        type="button"
+                        className="workspace-action-button warn inline-flex min-h-8 items-center justify-center rounded-xl px-2.5 text-sm font-medium text-rose-700 transition duration-200 hover:bg-rose-50"
+                        onClick={() =>
+                          void handleDeleteConversation(
+                            conversation.conversation_id,
+                            conversation.conversation_title,
+                          )
+                        }
+                        aria-label={`Delete ${conversation.conversation_title}`}
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+          </div>
+        </aside>
 
-                  {showSendButton ? (
-                    <button type="submit" className="icon-button" aria-label="Send message">
-                      <SendIcon />
-                    </button>
-                  ) : null}
+        <main className="chat-panel grid min-h-[720px] overflow-hidden rounded-[2rem] border border-white/70 bg-[rgba(255,252,248,0.82)] shadow-[0_28px_90px_rgba(41,37,36,0.12)] backdrop-blur-xl">
+          <div className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)_auto]">
+            <div className="chat-header border-b border-stone-200/80 px-5 pb-5 pt-5 md:px-8 md:pt-7">
+              <div className="chat-header-row flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+                <div className="max-w-3xl space-y-3">
+                  <div className="inline-flex items-center gap-2 rounded-full border border-stone-200 bg-white/85 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-stone-500">
+                    Anthropic Console tone
+                  </div>
+                  <div>
+                    <h2 className="font-['Iowan_Old_Style','Palatino_Linotype','Noto_Serif_TC',serif] text-3xl font-semibold tracking-[-0.03em] text-stone-950">
+                      {isSettingsOpen ? "Workspace Settings" : activeTitle}
+                    </h2>
+                    <p className="mt-2 text-sm text-stone-600">
+                      {activeWorkspace
+                        ? `${activeWorkspace.name} | ${activeWorkspace.selected_model.label}`
+                        : "Create a Workspace before starting a Conversation."}
+                    </p>
+                  </div>
                 </div>
-              </form>
+                {activeWorkspace ? (
+                  <button
+                    type="button"
+                    className="secondary-button inline-flex items-center justify-center gap-2 self-start rounded-2xl border border-stone-200 bg-white/90 px-4 py-3 text-sm font-medium text-stone-700 transition duration-200 hover:-translate-y-0.5 hover:border-rose-200 hover:text-rose-500 focus:outline-none focus:ring-4 focus:ring-rose-200/70"
+                    onClick={isSettingsOpen ? closeWorkspaceSettings : openWorkspaceSettings}
+                    aria-label={isSettingsOpen ? "Back to chat" : "Open workspace settings"}
+                  >
+                    <SlidersIcon className="h-4 w-4" />
+                    {isSettingsOpen ? "Back to chat" : "Settings"}
+                  </button>
+                ) : null}
+              </div>
             </div>
-          </>
-        )}
-      </main>
+
+            {errorMessage ? (
+              <div className="error-banner mx-5 mt-5 rounded-[1.25rem] border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 md:mx-8" role="alert">
+                {errorMessage}
+              </div>
+            ) : null}
+
+            {isSettingsOpen && settingsDraft && settingsWorkspace ? (
+              <>
+                <section className="messages settings-panel chat-scrollbar overflow-y-auto px-5 py-5 md:px-8">
+                  <div className="mx-auto flex w-full max-w-4xl flex-col gap-6 rounded-[2rem] border border-white/80 bg-white/88 p-5 shadow-[0_20px_50px_rgba(28,25,23,0.08)] md:p-7">
+                    <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+                      <div>
+                        <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-stone-500">
+                          Workspace-owned settings
+                        </p>
+                        <h3 className="mt-2 font-['Iowan_Old_Style','Palatino_Linotype','Noto_Serif_TC',serif] text-2xl font-semibold tracking-[-0.03em] text-stone-950">
+                          Tune tone, instructions, and model behavior
+                        </h3>
+                      </div>
+                      <div className="rounded-full bg-stone-100 px-3 py-1 text-xs text-stone-500">
+                        Changes stay local until you save
+                      </div>
+                    </div>
+
+                    <div className="settings-tabs flex flex-wrap gap-2" role="tablist" aria-label="Workspace settings tabs">
+                      <button
+                        type="button"
+                        className={cn(
+                          "settings-tab rounded-full px-4 py-2 text-sm font-medium transition duration-200",
+                          activeSettingsTab === "general"
+                            ? "active bg-stone-950 text-stone-50"
+                            : "bg-stone-100 text-stone-600 hover:bg-rose-50 hover:text-rose-600",
+                        )}
+                        role="tab"
+                        aria-selected={activeSettingsTab === "general"}
+                        onClick={() => setActiveSettingsTab("general")}
+                      >
+                        General
+                      </button>
+                      <button
+                        type="button"
+                        className={cn(
+                          "settings-tab rounded-full px-4 py-2 text-sm font-medium transition duration-200",
+                          activeSettingsTab === "model"
+                            ? "active bg-stone-950 text-stone-50"
+                            : "bg-stone-100 text-stone-600 hover:bg-rose-50 hover:text-rose-600",
+                        )}
+                        role="tab"
+                        aria-selected={activeSettingsTab === "model"}
+                        onClick={() => setActiveSettingsTab("model")}
+                      >
+                        Model
+                      </button>
+                    </div>
+
+                    {activeSettingsTab === "general" ? (
+                      <div className="grid gap-5">
+                        <div className="settings-field">
+                          <label htmlFor="workspace-name-input" className="mb-2 block text-sm font-medium text-stone-700">
+                            Workspace Name
+                          </label>
+                          <input
+                            id="workspace-name-input"
+                            className="w-full rounded-[1.25rem] border border-stone-200 bg-stone-50 px-4 py-3 text-sm text-stone-900 outline-none transition duration-200 focus:border-rose-300 focus:bg-white focus:ring-4 focus:ring-rose-200/60"
+                            value={settingsDraft.name}
+                            onChange={(nextEvent) =>
+                              setSettingsDraft((current) =>
+                                current === null ? current : { ...current, name: nextEvent.target.value },
+                              )
+                            }
+                            aria-label="Workspace Name"
+                          />
+                          {settingsValidationErrors.name ? (
+                            <div className="field-error mt-2 text-sm text-rose-700">{settingsValidationErrors.name}</div>
+                          ) : null}
+                        </div>
+
+                        <div className="settings-field">
+                          <label htmlFor="system-message-input" className="mb-2 block text-sm font-medium text-stone-700">
+                            System Message
+                          </label>
+                          <textarea
+                            id="system-message-input"
+                            className="min-h-56 w-full rounded-[1.5rem] border border-stone-200 bg-stone-50 px-4 py-4 text-sm text-stone-900 outline-none transition duration-200 focus:border-rose-300 focus:bg-white focus:ring-4 focus:ring-rose-200/60"
+                            value={settingsDraft.systemMessage}
+                            onChange={(nextEvent) =>
+                              setSettingsDraft((current) =>
+                                current === null ? current : { ...current, systemMessage: nextEvent.target.value },
+                              )
+                            }
+                            aria-label="System Message"
+                          />
+                          {settingsValidationErrors.systemMessage ? (
+                            <div className="field-error mt-2 text-sm text-rose-700">{settingsValidationErrors.systemMessage}</div>
+                          ) : null}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="grid gap-5">
+                        <div className="settings-field">
+                          <label htmlFor="selected-model-input" className="mb-2 block text-sm font-medium text-stone-700">
+                            Selected Model
+                          </label>
+                          <select
+                            id="selected-model-input"
+                            className="w-full rounded-[1.25rem] border border-stone-200 bg-stone-50 px-4 py-3 text-sm text-stone-900 outline-none transition duration-200 focus:border-rose-300 focus:bg-white focus:ring-4 focus:ring-rose-200/60"
+                            value={settingsDraft.selectedModelId}
+                            onChange={(nextEvent) => updateSelectedModel(nextEvent.target.value)}
+                            aria-label="Selected Model"
+                          >
+                            {selectedModelOptionMissing ? (
+                              <option value={settingsDraft.selectedModelId}>
+                                {settingsWorkspace.selected_model.label} (disabled)
+                              </option>
+                            ) : null}
+                            {modelCatalog.map((model) => (
+                              <option key={model.model_id} value={model.model_id}>
+                                {model.label}
+                              </option>
+                            ))}
+                          </select>
+                          {settingsValidationErrors.selectedModelId ? (
+                            <div className="field-error mt-2 text-sm text-rose-700">{settingsValidationErrors.selectedModelId}</div>
+                          ) : null}
+                        </div>
+
+                        {settingsSelectedModel ? (
+                          Object.entries(settingsSelectedModel.settings_schema).map(([settingKey, schema]) => (
+                            <div key={settingKey} className="settings-field">
+                              <label htmlFor={`model-setting-${settingKey}`} className="mb-2 block text-sm font-medium text-stone-700">
+                                {schema.label}
+                              </label>
+                              {schema.type === "number" ? (
+                                <input
+                                  id={`model-setting-${settingKey}`}
+                                  className="w-full rounded-[1.25rem] border border-stone-200 bg-stone-50 px-4 py-3 text-sm text-stone-900 outline-none transition duration-200 focus:border-rose-300 focus:bg-white focus:ring-4 focus:ring-rose-200/60"
+                                  type="number"
+                                  min={schema.min}
+                                  max={schema.max}
+                                  step={schema.step ?? 0.1}
+                                  value={String(settingsDraft.modelSettings[settingKey] ?? "")}
+                                  onChange={(nextEvent) => updateModelSetting(settingKey, schema, nextEvent.target.value)}
+                                  aria-label={schema.label}
+                                />
+                              ) : (
+                                <select
+                                  id={`model-setting-${settingKey}`}
+                                  className="w-full rounded-[1.25rem] border border-stone-200 bg-stone-50 px-4 py-3 text-sm text-stone-900 outline-none transition duration-200 focus:border-rose-300 focus:bg-white focus:ring-4 focus:ring-rose-200/60"
+                                  value={String(settingsDraft.modelSettings[settingKey] ?? "")}
+                                  onChange={(nextEvent) => updateModelSetting(settingKey, schema, nextEvent.target.value)}
+                                  aria-label={schema.label}
+                                >
+                                  {(schema.options ?? []).map((option) => (
+                                    <option key={option.value} value={option.value}>
+                                      {option.label}
+                                    </option>
+                                  ))}
+                                </select>
+                              )}
+                              {schema.help_text ? (
+                                <div className="settings-hint mt-2 text-sm text-stone-500">{schema.help_text}</div>
+                              ) : null}
+                              {settingsValidationErrors.modelSettings[settingKey] ? (
+                                <div className="field-error mt-2 text-sm text-rose-700">
+                                  {settingsValidationErrors.modelSettings[settingKey]}
+                                </div>
+                              ) : null}
+                            </div>
+                          ))
+                        ) : (
+                          <div className="settings-hint rounded-[1.25rem] border border-dashed border-stone-300 bg-stone-50/80 px-4 py-4 text-sm text-stone-500">
+                            Select an enabled model to review the available Model-specific Settings.
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    <div className="settings-hint rounded-[1.25rem] border border-stone-200 bg-[#f6efe6] px-4 py-3 text-sm text-stone-600">
+                      Pending settings stay local until you explicitly save them for future turns.
+                    </div>
+                  </div>
+                </section>
+
+                <div className="composer settings-actions border-t border-stone-200/80 bg-[rgba(255,248,242,0.88)] px-5 py-4 md:px-8">
+                  <div className="settings-actions-row mx-auto flex w-full max-w-4xl justify-end gap-3">
+                    <button
+                      type="button"
+                      className="secondary-button rounded-2xl border border-stone-200 bg-white/90 px-4 py-3 text-sm font-medium text-stone-700 transition duration-200 hover:border-rose-200 hover:text-rose-500"
+                      onClick={closeWorkspaceSettings}
+                    >
+                      Back to chat
+                    </button>
+                    <button
+                      type="button"
+                      className="primary-button rounded-2xl bg-stone-950 px-4 py-3 text-sm font-medium text-white shadow-[0_16px_30px_rgba(24,24,27,0.22)] transition duration-200 hover:-translate-y-0.5 hover:bg-rose-500 disabled:cursor-not-allowed disabled:opacity-45 disabled:shadow-none"
+                      onClick={() => void saveWorkspaceSettings()}
+                      disabled={!canSaveSettings}
+                    >
+                      Save settings
+                    </button>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <>
+                <section className="messages chat-scrollbar overflow-y-auto px-5 py-5 md:px-8">
+                  {activeMessages.length === 0 ? (
+                    <div className="empty-state mx-auto flex min-h-full w-full max-w-3xl items-center justify-center">
+                      <div className="w-full rounded-[2rem] border border-white/80 bg-white/82 p-8 shadow-[0_20px_50px_rgba(28,25,23,0.08)]">
+                        <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_16rem]">
+                          <div>
+                            <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-stone-500">
+                              Playground mode
+                            </p>
+                            <h3 className="mt-3 font-['Iowan_Old_Style','Palatino_Linotype','Noto_Serif_TC',serif] text-3xl font-semibold tracking-[-0.03em] text-stone-950">
+                              {activeWorkspace
+                                ? isGenerationBlocked
+                                  ? "這個 Workspace 目前無法送出新對話"
+                                  : "\u958b\u59cb\u4e00\u6bb5\u65b0\u5c0d\u8a71"
+                                : "\u5148\u5efa\u7acb\u5de5\u4f5c\u5340"}
+                            </h3>
+                            <p className="mt-4 max-w-xl text-sm leading-7 text-stone-600">
+                              {activeWorkspace
+                                ? isGenerationBlocked
+                                  ? "Selected Model is disabled for new generation. Open Workspace Settings and choose an enabled model."
+                                  : "\u7b2c\u4e00\u53e5 User Prompt \u9001\u51fa\u5f8c\u624d\u6703\u5728\u9019\u500b Workspace \u5efa\u7acb Conversation\u3002"
+                                : "\u5de6\u5074\u8f38\u5165 Workspace Name \u4e26\u5efa\u7acb\uff0c\u518d\u958b\u59cb\u5c0d\u8a71\u3002"}
+                            </p>
+                          </div>
+                          <div className="space-y-3 rounded-[1.5rem] border border-stone-200 bg-[#f6efe6] p-4 text-sm text-stone-600">
+                            <div className="rounded-[1rem] bg-white/80 px-3 py-3">
+                              Streaming text appears directly in chat.
+                            </div>
+                            <div className="rounded-[1rem] bg-white/80 px-3 py-3">
+                              Workspace settings keep tone and model scoped together.
+                            </div>
+                            <div className="rounded-[1rem] bg-white/80 px-3 py-3">
+                              Active streams continue even if you browse elsewhere.
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="mx-auto flex w-full max-w-4xl flex-col gap-5">
+                      {activeMessages.map((message) => (
+                        <div
+                          key={message.id}
+                          className={cn(
+                            "message-row flex",
+                            message.role === "user" ? "user justify-end" : "assistant justify-start",
+                          )}
+                        >
+                          <div className={cn("max-w-[88%] md:max-w-[78%]", message.role === "user" ? "items-end" : "items-start")}>
+                            <div
+                              className={cn(
+                                "mb-2 text-[11px] font-semibold uppercase tracking-[0.16em]",
+                                message.role === "user" ? "text-right text-stone-500" : "text-stone-400",
+                              )}
+                            >
+                              {message.role === "user" ? "User prompt" : "Assistant"}
+                            </div>
+                            <div
+                              className={cn(
+                                "message-bubble rounded-[1.75rem] border px-5 py-4 text-[15px] leading-7 shadow-[0_18px_36px_rgba(28,25,23,0.05)]",
+                                message.status === "streaming" && "streaming",
+                                message.role === "user"
+                                  ? "border-stone-950 bg-stone-950 text-stone-50"
+                                  : "border-white/80 bg-white/92 text-stone-800",
+                              )}
+                            >
+                              <div>{message.content || (message.status === "streaming" ? " " : "")}</div>
+                              {message.status === "stopped" ? (
+                                <div className="message-status mt-3 text-xs font-medium uppercase tracking-[0.14em] text-amber-700">
+                                  {"\u5df2\u4e2d\u65b7"}
+                                </div>
+                              ) : null}
+                              {message.status === "error" ? (
+                                <div className="message-status mt-3 text-xs font-medium uppercase tracking-[0.14em] text-rose-700">
+                                  {"\u767c\u751f\u932f\u8aa4"}
+                                </div>
+                              ) : null}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </section>
+
+                <div className="composer border-t border-stone-200/80 bg-[rgba(255,248,242,0.9)] px-5 py-4 md:px-8 md:py-5">
+                  <div className="mx-auto w-full max-w-4xl">
+                    <div className="mb-3 flex flex-wrap items-center gap-2 text-xs text-stone-500">
+                      {activeWorkspace ? (
+                        <>
+                          <span className="rounded-full border border-stone-200 bg-white/90 px-3 py-1">
+                            {activeWorkspace.name}
+                          </span>
+                          <span className="rounded-full border border-stone-200 bg-white/90 px-3 py-1">
+                            {activeWorkspace.selected_model.label}
+                          </span>
+                        </>
+                      ) : (
+                        <span className="rounded-full border border-dashed border-stone-300 bg-white/80 px-3 py-1">
+                          Choose a workspace to begin
+                        </span>
+                      )}
+                    </div>
+                    <form className="composer-form grid gap-3 md:grid-cols-[minmax(0,1fr)_auto]" onSubmit={handleSubmit}>
+                      <textarea
+                        className="min-h-32 w-full rounded-[1.75rem] border border-stone-200 bg-white px-5 py-4 text-[15px] text-stone-900 outline-none transition duration-200 placeholder:text-stone-400 focus:border-rose-300 focus:ring-4 focus:ring-rose-200/60 disabled:cursor-not-allowed disabled:bg-stone-100"
+                        value={draft}
+                        onChange={(nextEvent) => setDraft(nextEvent.target.value)}
+                        placeholder={
+                          activeWorkspace
+                            ? isGenerationBlocked
+                              ? "請先在 Workspace Settings 選擇可用模型"
+                              : "\u8f38\u5165\u8a0a\u606f..."
+                            : "\u5148\u5efa\u7acb\u6216\u9078\u64c7\u5de5\u4f5c\u5340"
+                        }
+                        aria-label={"\u8a0a\u606f\u8f38\u5165\u6846"}
+                        disabled={activeWorkspaceId === null || isGenerationBlocked}
+                      />
+
+                      <div className="composer-actions flex items-end justify-end gap-3 md:min-w-[8rem]">
+                        {showStopButton ? (
+                          <button
+                            type="button"
+                            className="icon-button stop inline-flex h-14 w-14 items-center justify-center rounded-2xl bg-rose-500 text-white shadow-[0_16px_30px_rgba(244,63,94,0.22)] transition duration-200 hover:-translate-y-0.5 hover:bg-rose-600 focus:outline-none focus:ring-4 focus:ring-rose-200/70"
+                            onClick={() => void stopStreaming()}
+                            aria-label="Stop response"
+                          >
+                            <StopIcon className="h-5 w-5" />
+                          </button>
+                        ) : null}
+
+                        {showSendButton ? (
+                          <button
+                            type="submit"
+                            className="icon-button inline-flex h-14 w-14 items-center justify-center rounded-2xl bg-stone-950 text-white shadow-[0_16px_30px_rgba(24,24,27,0.22)] transition duration-200 hover:-translate-y-0.5 hover:bg-rose-500 focus:outline-none focus:ring-4 focus:ring-rose-200/70"
+                            aria-label="Send message"
+                          >
+                            <SendIcon className="h-5 w-5" />
+                          </button>
+                        ) : null}
+                      </div>
+                    </form>
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        </main>
+      </div>
     </div>
   );
 }
