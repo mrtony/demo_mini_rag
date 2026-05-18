@@ -1,3 +1,15 @@
+## Tech stack
+
+### backend
+
+The backend is built with Python and FastAPI. It provides RESTful APIs for agent management, task execution, and data storage.
+
+### frontend
+
+The frontend is built with React and TypeScript. It provides a user interface for managing agents, viewing task results, and configuring settings.
+
+USe Tailwind CSS for styling the frontend components.
+
 ## Agent skills
 
 ### Issue tracker
