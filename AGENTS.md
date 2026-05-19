@@ -14,6 +14,14 @@ The frontend is built with React and TypeScript. It provides a user interface fo
 
 USe Tailwind CSS for styling the frontend components.
 
+## Testing
+
+Run tests with:
+
+```bash
+.\.venv\Scripts\python.exe -m pytest
+```
+
 ## Agent skills
 
 ### Issue tracker
