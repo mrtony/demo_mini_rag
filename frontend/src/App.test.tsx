@@ -567,6 +567,7 @@ describe("App", () => {
         conversation_id: 0,
         message_id: 0,
         message: "第一句話",
+        knowledge_answering_enabled: false,
       },
       expect.any(AbortSignal),
     );
@@ -809,6 +810,250 @@ describe("App", () => {
 
     expect(await screen.findByText("舊問題")).toBeInTheDocument();
     expect(await screen.findByText("舊回答")).toBeInTheDocument();
+  });
+
+  it("initializes the composer knowledge toggle from workspace defaults and sends a one-turn override", async () => {
+    const user = userEvent.setup();
+
+    mockedListWorkspaces.mockResolvedValue([
+      {
+        workspace_id: "ws-kb-chat",
+        name: "Workspace KB Chat",
+        system_message: "Workspace system",
+        selected_model: {
+          model_id: "gpt-5.4-nano",
+          label: "gpt-5.4-nano",
+          is_enabled: true,
+          is_default_workspace_model: true,
+        },
+        model_settings: {
+          temperature: 0.7,
+        },
+        created_at: "2026-05-15T00:00:00Z",
+        updated_at: "2026-05-15T00:00:00Z",
+      },
+    ]);
+    mockedGetKnowledgeBaseSettings.mockResolvedValue({
+      workspace_id: "ws-kb-chat",
+      chunk_size: 800,
+      chunk_overlap: 200,
+      retrieval_top_k: 8,
+      similarity_threshold: 0.2,
+      knowledge_answering_default: true,
+      rebuild_required: false,
+    });
+    mockedListWorkspaceConversations.mockResolvedValue([]);
+    mockedOpenChatStream.mockResolvedValue({ body: {} as ReadableStream<Uint8Array> } as Response);
+    mockedReadSseStream.mockImplementation(async (_body, onEvent) => {
+      onEvent({
+        event: "conversation.created",
+        data: { workspace_id: "ws-kb-chat", conversation_id: "conv-kb", conversation_title: "KB question" },
+      });
+      onEvent({ event: "message.created", data: { message_id: 1 } });
+      onEvent({ event: "message.delta", data: { delta: "Hello" } });
+      onEvent({
+        event: "message.done",
+        data: {
+          status: "completed",
+          knowledge_answering_requested: false,
+          knowledge_answering_used: false,
+          fallback_reason: null,
+        },
+      });
+    });
+
+    render(<App />);
+
+    expect(await screen.findByRole("button", { name: "Workspace KB Chat gpt-5.4-nano" })).toBeInTheDocument();
+    const knowledgeToggle = await screen.findByRole("checkbox", { name: "Knowledge Answering" });
+    await waitFor(() => expect(knowledgeToggle).toBeChecked());
+
+    await user.click(knowledgeToggle);
+    expect(knowledgeToggle).not.toBeChecked();
+
+    await user.type(screen.getByLabelText("訊息輸入框"), "KB question");
+    await user.click(screen.getByLabelText("Send message"));
+
+    expect(mockedOpenChatStream).toHaveBeenCalledWith(
+      {
+        workspace_id: "ws-kb-chat",
+        conversation_id: 0,
+        message_id: 0,
+        message: "KB question",
+        knowledge_answering_enabled: false,
+      },
+      expect.any(AbortSignal),
+    );
+
+    await waitFor(() => expect(screen.queryByLabelText("Stop response")).not.toBeInTheDocument());
+    expect(screen.getByRole("checkbox", { name: "Knowledge Answering" })).toBeChecked();
+  });
+
+  it("shows a visible fallback note when knowledge answering cannot run for a turn", async () => {
+    const user = userEvent.setup();
+    let conversationCreated = false;
+
+    mockedListWorkspaces.mockResolvedValue([
+      {
+        workspace_id: "ws-fallback",
+        name: "Workspace Fallback",
+        system_message: "Workspace system",
+        selected_model: {
+          model_id: "gpt-5.4-nano",
+          label: "gpt-5.4-nano",
+          is_enabled: true,
+          is_default_workspace_model: true,
+        },
+        model_settings: {
+          temperature: 0.7,
+        },
+        created_at: "2026-05-15T00:00:00Z",
+        updated_at: "2026-05-15T00:00:00Z",
+      },
+    ]);
+    mockedGetKnowledgeBaseSettings.mockResolvedValue({
+      workspace_id: "ws-fallback",
+      chunk_size: 800,
+      chunk_overlap: 200,
+      retrieval_top_k: 8,
+      similarity_threshold: 0.2,
+      knowledge_answering_default: true,
+      rebuild_required: false,
+    });
+    mockedListWorkspaceConversations.mockImplementation(async () =>
+      conversationCreated
+        ? [
+            {
+              workspace_id: "ws-fallback",
+              conversation_id: "conv-fallback",
+              conversation_title: "Fallback",
+              updated_at: "2026-05-15T00:01:00Z",
+            },
+          ]
+        : [],
+    );
+    mockedOpenChatStream.mockResolvedValue({ body: {} as ReadableStream<Uint8Array> } as Response);
+    mockedReadSseStream.mockImplementation(async (_body, onEvent) => {
+      conversationCreated = true;
+      onEvent({
+        event: "conversation.created",
+        data: { workspace_id: "ws-fallback", conversation_id: "conv-fallback", conversation_title: "Fallback" },
+      });
+      onEvent({ event: "message.created", data: { message_id: 1 } });
+      onEvent({ event: "message.delta", data: { delta: "Hello" } });
+      onEvent({
+        event: "message.done",
+        data: {
+          status: "completed",
+          knowledge_answering_requested: true,
+          knowledge_answering_used: false,
+          fallback_reason: "knowledge_base_unavailable",
+        },
+      });
+    });
+
+    render(<App />);
+
+    expect(await screen.findByRole("button", { name: "Workspace Fallback gpt-5.4-nano" })).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByRole("checkbox", { name: "Knowledge Answering" })).toBeChecked(),
+    );
+    await user.type(screen.getByLabelText("訊息輸入框"), "Fallback");
+    await user.click(screen.getByLabelText("Send message"));
+
+    expect(await screen.findByText("Knowledge Answering unavailable for this turn. Fell back to chat.")).toBeInTheDocument();
+  });
+
+  it("renders sources beneath the assistant reply when a knowledge-backed turn succeeds", async () => {
+    const user = userEvent.setup();
+    let conversationCreated = false;
+
+    mockedListWorkspaces.mockResolvedValue([
+      {
+        workspace_id: "ws-sources",
+        name: "Workspace Sources",
+        system_message: "Workspace system",
+        selected_model: {
+          model_id: "gpt-5.4-nano",
+          label: "gpt-5.4-nano",
+          is_enabled: true,
+          is_default_workspace_model: true,
+        },
+        model_settings: {
+          temperature: 0.7,
+        },
+        created_at: "2026-05-15T00:00:00Z",
+        updated_at: "2026-05-15T00:00:00Z",
+      },
+    ]);
+    mockedGetKnowledgeBaseSettings.mockResolvedValue({
+      workspace_id: "ws-sources",
+      chunk_size: 800,
+      chunk_overlap: 200,
+      retrieval_top_k: 8,
+      similarity_threshold: 0.2,
+      knowledge_answering_default: true,
+      rebuild_required: false,
+    });
+    mockedListWorkspaceConversations.mockImplementation(async () =>
+      conversationCreated
+        ? [
+            {
+              workspace_id: "ws-sources",
+              conversation_id: "conv-sources",
+              conversation_title: "Sources",
+              updated_at: "2026-05-15T00:01:00Z",
+            },
+          ]
+        : [],
+    );
+    mockedOpenChatStream.mockResolvedValue({ body: {} as ReadableStream<Uint8Array> } as Response);
+    mockedReadSseStream.mockImplementation(async (_body, onEvent) => {
+      conversationCreated = true;
+      onEvent({
+        event: "conversation.created",
+        data: { workspace_id: "ws-sources", conversation_id: "conv-sources", conversation_title: "Sources" },
+      });
+      onEvent({ event: "message.created", data: { message_id: 1 } });
+      onEvent({ event: "message.delta", data: { delta: "Answer grounded in docs." } });
+      onEvent({
+        event: "sources",
+        data: {
+          sources: [
+            {
+              knowledge_document_id: "doc-1",
+              display_filename: "alpha-plan.md",
+              revision_number: 3,
+              chunk_count: 4,
+              excerpt: "Milestones: kickoff, beta, launch.",
+              score: 0.94,
+            },
+          ],
+        },
+      });
+      onEvent({
+        event: "message.done",
+        data: {
+          status: "completed",
+          knowledge_answering_requested: true,
+          knowledge_answering_used: true,
+          fallback_reason: null,
+        },
+      });
+    });
+
+    render(<App />);
+
+    expect(await screen.findByRole("button", { name: "Workspace Sources gpt-5.4-nano" })).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByRole("checkbox", { name: "Knowledge Answering" })).toBeChecked(),
+    );
+    await user.type(screen.getByLabelText("訊息輸入框"), "Sources");
+    await user.click(screen.getByLabelText("Send message"));
+
+    expect((await screen.findAllByText("Sources")).length).toBeGreaterThan(0);
+    expect(screen.getByText("alpha-plan.md")).toBeInTheDocument();
+    expect(screen.getByText("Milestones: kickoff, beta, launch.")).toBeInTheDocument();
   });
 
   it("keeps general settings pending until explicit save and stays in settings after saving", async () => {

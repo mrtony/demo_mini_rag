@@ -307,6 +307,7 @@ export default function App() {
   const [pendingConversationMessages, setPendingConversationMessages] = useState<ChatBubble[]>([]);
   const [pendingConversationWorkspaceId, setPendingConversationWorkspaceId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
+  const [composerKnowledgeAnsweringEnabled, setComposerKnowledgeAnsweringEnabled] = useState(false);
   const [newWorkspaceName, setNewWorkspaceName] = useState("");
   const [isStreamInFlight, setIsStreamInFlight] = useState(false);
   const [streamingConversationId, setStreamingConversationId] = useState<string | null>(null);
@@ -348,6 +349,7 @@ export default function App() {
   useEffect(() => {
     if (activeWorkspaceId === null) {
       setActiveConversationId(null);
+      setComposerKnowledgeAnsweringEnabled(false);
       setIsSettingsOpen(false);
       setSettingsDraft(null);
       setKnowledgeBaseSettingsDraft(null);
@@ -356,6 +358,7 @@ export default function App() {
       return;
     }
     void refreshWorkspaceConversations(activeWorkspaceId);
+    void loadKnowledgeBaseSettings(activeWorkspaceId);
   }, [activeWorkspaceId]);
 
   useEffect(() => {
@@ -384,6 +387,16 @@ export default function App() {
   useEffect(() => {
     pendingConversationWorkspaceIdRef.current = pendingConversationWorkspaceId;
   }, [pendingConversationWorkspaceId]);
+
+  useEffect(() => {
+    if (activeWorkspaceId === null) {
+      return;
+    }
+    const activeKnowledgeSettings = knowledgeBaseSettingsByWorkspaceId[activeWorkspaceId];
+    if (activeKnowledgeSettings) {
+      setComposerKnowledgeAnsweringEnabled(activeKnowledgeSettings.knowledge_answering_default);
+    }
+  }, [activeWorkspaceId, knowledgeBaseSettingsByWorkspaceId]);
 
   function setPendingConversationState(workspaceId: string | null, messages: ChatBubble[]) {
     pendingConversationMessagesRef.current = messages;
@@ -755,12 +768,34 @@ export default function App() {
       return;
     }
 
+    if (event.event === "sources") {
+      const rawSources = Array.isArray(event.data.sources) ? event.data.sources : [];
+      updateStreamBubble(targetBubbleId, (item) => ({
+        ...item,
+        sources: rawSources.map((source) => ({
+          knowledge_document_id: String(source.knowledge_document_id ?? ""),
+          display_filename: String(source.display_filename ?? ""),
+          revision_number: Number(source.revision_number ?? 0),
+          chunk_count: Number(source.chunk_count ?? 0),
+          excerpt: String(source.excerpt ?? ""),
+          score: Number(source.score ?? 0),
+        })),
+      }));
+      return;
+    }
+
     if (event.event === "message.done") {
       const status = event.data.status;
       const nextStatus: ChatBubble["status"] =
         status === "completed" || status === "stopped" || status === "error" ? status : "completed";
       updateStreamBubble(targetBubbleId, (item) => ({
         ...item,
+        knowledgeAnsweringRequested: Boolean(event.data.knowledge_answering_requested ?? item.knowledgeAnsweringRequested),
+        knowledgeAnsweringUsed: Boolean(event.data.knowledge_answering_used ?? item.knowledgeAnsweringUsed),
+        fallbackReason:
+          typeof event.data.fallback_reason === "string" || event.data.fallback_reason === null
+            ? (event.data.fallback_reason as string | null)
+            : item.fallbackReason ?? null,
         status:
           stopRequestedBubbleRef.current === item.id && nextStatus !== "error"
             ? "stopped"
@@ -783,6 +818,9 @@ export default function App() {
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const trimmed = draft.trim();
+    const activeKnowledgeBaseSettings =
+      activeWorkspaceId === null ? null : knowledgeBaseSettingsByWorkspaceId[activeWorkspaceId] ?? null;
+    const knowledgeAnsweringEnabled = composerKnowledgeAnsweringEnabled;
     if (
       !trimmed ||
       isStreamInFlight ||
@@ -794,6 +832,9 @@ export default function App() {
 
     setErrorMessage(null);
     setDraft("");
+    if (activeKnowledgeBaseSettings) {
+      setComposerKnowledgeAnsweringEnabled(activeKnowledgeBaseSettings.knowledge_answering_default);
+    }
 
     const userBubble = createLocalBubble("user", trimmed, "completed");
     const assistantBubble = createLocalBubble("assistant", "", "streaming");
@@ -820,6 +861,7 @@ export default function App() {
           conversation_id: activeConversationId ?? 0,
           message_id: 0,
           message: trimmed,
+          knowledge_answering_enabled: knowledgeAnsweringEnabled,
         },
         controller.signal,
       );
@@ -2180,6 +2222,32 @@ export default function App() {
                                   {"\u767c\u751f\u932f\u8aa4"}
                                 </div>
                               ) : null}
+                              {message.role === "assistant" && message.fallbackReason === "knowledge_base_unavailable" ? (
+                                <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                                  Knowledge Answering unavailable for this turn. Fell back to chat.
+                                </div>
+                              ) : null}
+                              {message.role === "assistant" && message.fallbackReason === "retrieval_insufficient" ? (
+                                <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                                  Knowledge Answering found insufficient evidence for this turn. Fell back to chat.
+                                </div>
+                              ) : null}
+                              {message.role === "assistant" && (message.sources?.length ?? 0) > 0 ? (
+                                <div className="mt-4 rounded-2xl border border-stone-200 bg-stone-50 px-4 py-3 text-sm text-stone-700">
+                                  <div className="mb-2 text-xs font-semibold uppercase tracking-[0.14em] text-stone-500">
+                                    Sources
+                                  </div>
+                                  {message.sources?.map((source) => (
+                                    <div key={`${source.knowledge_document_id}-${source.revision_number}`} className="mb-3 last:mb-0">
+                                      <div className="font-medium text-stone-900">{source.display_filename}</div>
+                                      <div className="text-xs text-stone-500">
+                                        Revision {source.revision_number} · {source.chunk_count} chunks
+                                      </div>
+                                      <div className="mt-1 text-sm text-stone-700">{source.excerpt}</div>
+                                    </div>
+                                  ))}
+                                </div>
+                              ) : null}
                             </div>
                           </div>
                         </div>
@@ -2206,6 +2274,16 @@ export default function App() {
                         </span>
                       )}
                     </div>
+                    <label className="mb-3 inline-flex items-center gap-3 rounded-full border border-stone-200 bg-white/90 px-4 py-2 text-sm text-stone-700">
+                      <input
+                        type="checkbox"
+                        aria-label="Knowledge Answering"
+                        checked={composerKnowledgeAnsweringEnabled}
+                        onChange={(nextEvent) => setComposerKnowledgeAnsweringEnabled(nextEvent.target.checked)}
+                        disabled={activeWorkspaceId === null || isGenerationBlocked || isStreamInFlight}
+                      />
+                      <span>Knowledge Answering</span>
+                    </label>
                     <form className="composer-form grid gap-3 md:grid-cols-[minmax(0,1fr)_auto]" onSubmit={handleSubmit}>
                       <textarea
                         className="min-h-32 w-full rounded-[1.75rem] border border-stone-200 bg-white px-5 py-4 text-[15px] text-stone-900 outline-none transition duration-200 placeholder:text-stone-400 focus:border-rose-300 focus:ring-4 focus:ring-rose-200/60 disabled:cursor-not-allowed disabled:bg-stone-100"

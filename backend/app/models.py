@@ -392,6 +392,11 @@ class Message(Base):
     response: Mapped[str] = mapped_column(Text, default="")
     openai_response_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="streaming")
+    knowledge_answering_requested: Mapped[bool] = mapped_column(Boolean, default=False)
+    knowledge_answering_used: Mapped[bool] = mapped_column(Boolean, default=False)
+    fallback_reason: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    retrieval_query: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sources_json: Mapped[str] = mapped_column(Text, default="[]")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

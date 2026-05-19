@@ -9,6 +9,16 @@ class ChatStreamRequest(BaseModel):
     conversation_id: str | int = Field(default=0)
     message_id: int = 0
     message: str = Field(min_length=1)
+    knowledge_answering_enabled: bool | None = None
+
+
+class SourceCitation(BaseModel):
+    knowledge_document_id: str
+    display_filename: str
+    revision_number: int
+    chunk_count: int
+    excerpt: str
+    score: float
 
 
 class ModelCatalogSummary(BaseModel):
@@ -168,6 +178,11 @@ class StoredMessage(BaseModel):
     query: str
     response: str
     status: str
+    knowledge_answering_requested: bool = False
+    knowledge_answering_used: bool = False
+    fallback_reason: str | None = None
+    retrieval_query: str | None = None
+    sources: list[SourceCitation] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 

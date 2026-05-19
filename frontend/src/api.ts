@@ -260,6 +260,10 @@ export function toChatBubbles(messages: StoredMessage[]): ChatBubble[] {
       content: message.response,
       status: normalizeStatus(message.status),
       messageId: message.id,
+      knowledgeAnsweringRequested: message.knowledge_answering_requested ?? false,
+      knowledgeAnsweringUsed: message.knowledge_answering_used ?? false,
+      fallbackReason: message.fallback_reason ?? null,
+      sources: message.sources ?? [],
     },
   ]);
 }

@@ -17,6 +17,7 @@ from backend.app.models import (
     WorkspaceModelSetting,
 )
 from backend.app.routes import get_chat_service
+from backend.app.services.kb_document_service import SearchResult
 
 
 def parse_sse_payload(raw_text: str) -> list[tuple[str, dict]]:
@@ -788,6 +789,245 @@ async def test_stream_errors_emit_error_event_and_persist_error_status(test_clie
     detail = detail_response.json()
     assert detail["messages"][0]["response"] == "Oops"
     assert detail["messages"][0]["status"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_turn_override_can_disable_knowledge_answering_for_one_turn(monkeypatch, test_client):
+    workspace = await create_workspace(test_client, "Workspace KB Override")
+
+    update_response = await test_client.put(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base-settings",
+        json={
+            "chunk_size": 800,
+            "chunk_overlap": 200,
+            "retrieval_top_k": 8,
+            "similarity_threshold": 0.2,
+            "knowledge_answering_default": True,
+        },
+    )
+    assert update_response.status_code == 200
+
+    async with db_module.SessionLocal() as session:
+        current_workspace = (
+            await session.execute(select(Workspace).where(Workspace.workspace_id == workspace["workspace_id"]))
+        ).scalar_one()
+        version = KnowledgeBaseVersion(
+            workspace_fk=current_workspace.id,
+            version_id="version-override",
+            version_number=1,
+            status="active",
+            collection_name="kb_override_collection",
+        )
+        session.add(version)
+        await session.flush()
+        current_workspace.active_knowledge_base_version_fk = version.id
+        await session.commit()
+
+    retrieval_calls: list[str] = []
+
+    async def fake_search_workspace_documents(*, workspace_id: str, query: str, session):
+        retrieval_calls.append(query)
+        return [
+            SearchResult(
+                knowledge_document_id="doc-1",
+                display_filename="guide.md",
+                revision_number=1,
+                chunk_count=1,
+                excerpt="Alpha project milestone notes",
+                score=0.91,
+            )
+        ]
+
+    monkeypatch.setattr(
+        "backend.app.services.turn_orchestration.search_workspace_documents",
+        fake_search_workspace_documents,
+    )
+
+    response = await test_client.post(
+        "/api/chat/stream",
+        json={
+            "workspace_id": workspace["workspace_id"],
+            "conversation_id": 0,
+            "message_id": 0,
+            "message": "Skip knowledge for this turn",
+            "knowledge_answering_enabled": False,
+        },
+    )
+
+    assert response.status_code == 200
+    assert retrieval_calls == []
+
+    events = parse_sse_payload(response.text)
+    done_event = next(payload for name, payload in events if name == "message.done")
+    assert done_event == {
+        "message_id": 1,
+        "status": "completed",
+        "knowledge_answering_requested": False,
+        "knowledge_answering_used": False,
+        "fallback_reason": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_workspace_default_knowledge_answering_builds_query_from_prompt_and_recent_context(
+    monkeypatch, test_client
+):
+    workspace = await create_workspace(test_client, "Workspace KB Query")
+
+    first_response = await test_client.post(
+        "/api/chat/stream",
+        json={
+            "workspace_id": workspace["workspace_id"],
+            "conversation_id": 0,
+            "message_id": 0,
+            "message": "Budget spreadsheet for last quarter",
+        },
+    )
+    first_events = parse_sse_payload(first_response.text)
+    conversation_id = first_events[0][1]["conversation_id"]
+
+    second_response = await test_client.post(
+        "/api/chat/stream",
+        json={
+            "workspace_id": workspace["workspace_id"],
+            "conversation_id": conversation_id,
+            "message_id": 0,
+            "message": "Alpha project launch plan",
+        },
+    )
+    assert second_response.status_code == 200
+
+    update_response = await test_client.put(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base-settings",
+        json={
+            "chunk_size": 800,
+            "chunk_overlap": 200,
+            "retrieval_top_k": 8,
+            "similarity_threshold": 0.2,
+            "knowledge_answering_default": True,
+        },
+    )
+    assert update_response.status_code == 200
+
+    async with db_module.SessionLocal() as session:
+        current_workspace = (
+            await session.execute(select(Workspace).where(Workspace.workspace_id == workspace["workspace_id"]))
+        ).scalar_one()
+        version = KnowledgeBaseVersion(
+            workspace_fk=current_workspace.id,
+            version_id="version-query",
+            version_number=1,
+            status="active",
+            collection_name="kb_query_collection",
+        )
+        session.add(version)
+        await session.flush()
+        current_workspace.active_knowledge_base_version_fk = version.id
+        await session.commit()
+
+    captured_queries: list[str] = []
+
+    async def fake_search_workspace_documents(*, workspace_id: str, query: str, session):
+        captured_queries.append(query)
+        return [
+            SearchResult(
+                knowledge_document_id="doc-alpha",
+                display_filename="alpha-plan.md",
+                revision_number=3,
+                chunk_count=4,
+                excerpt="Milestones: kickoff, beta, launch.",
+                score=0.94,
+            )
+        ]
+
+    monkeypatch.setattr(
+        "backend.app.services.turn_orchestration.search_workspace_documents",
+        fake_search_workspace_documents,
+    )
+
+    response = await test_client.post(
+        "/api/chat/stream",
+        json={
+            "workspace_id": workspace["workspace_id"],
+            "conversation_id": conversation_id,
+            "message_id": 0,
+            "message": "For Alpha, what milestones did we commit to?",
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(captured_queries) == 1
+    assert "For Alpha, what milestones did we commit to?" in captured_queries[0]
+    assert "Alpha project launch plan" in captured_queries[0]
+    assert "Budget spreadsheet for last quarter" not in captured_queries[0]
+
+    events = parse_sse_payload(response.text)
+    assert ("sources", {"sources": [
+        {
+            "knowledge_document_id": "doc-alpha",
+            "display_filename": "alpha-plan.md",
+            "revision_number": 3,
+            "chunk_count": 4,
+            "excerpt": "Milestones: kickoff, beta, launch.",
+            "score": 0.94,
+        }
+    ]}) in events
+    done_event = next(payload for name, payload in events if name == "message.done")
+    assert done_event == {
+        "message_id": 3,
+        "status": "completed",
+        "knowledge_answering_requested": True,
+        "knowledge_answering_used": True,
+        "fallback_reason": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_knowledge_answering_falls_back_to_plain_chat_when_workspace_has_no_active_version(test_client):
+    workspace = await create_workspace(test_client, "Workspace KB Fallback")
+
+    update_response = await test_client.put(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base-settings",
+        json={
+            "chunk_size": 800,
+            "chunk_overlap": 200,
+            "retrieval_top_k": 8,
+            "similarity_threshold": 0.2,
+            "knowledge_answering_default": True,
+        },
+    )
+    assert update_response.status_code == 200
+
+    response = await test_client.post(
+        "/api/chat/stream",
+        json={
+            "workspace_id": workspace["workspace_id"],
+            "conversation_id": 0,
+            "message_id": 0,
+            "message": "Answer with workspace knowledge if possible",
+        },
+    )
+
+    assert response.status_code == 200
+    events = parse_sse_payload(response.text)
+    done_event = next(payload for name, payload in events if name == "message.done")
+    assert done_event == {
+        "message_id": 1,
+        "status": "completed",
+        "knowledge_answering_requested": True,
+        "knowledge_answering_used": False,
+        "fallback_reason": "knowledge_base_unavailable",
+    }
+    assert all(name != "sources" for name, _ in events)
+
+    conversations_response = await test_client.get(f"/api/workspaces/{workspace['workspace_id']}/conversations")
+    conversation_id = conversations_response.json()[0]["conversation_id"]
+    detail_response = await test_client.get(f"/api/conversations/{conversation_id}")
+    stored_message = detail_response.json()["messages"][0]
+    assert stored_message["knowledge_answering_requested"] is True
+    assert stored_message["knowledge_answering_used"] is False
+    assert stored_message["fallback_reason"] == "knowledge_base_unavailable"
+    assert stored_message["sources"] == []
 
 
 @pytest.mark.asyncio

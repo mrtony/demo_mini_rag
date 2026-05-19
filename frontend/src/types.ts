@@ -100,8 +100,22 @@ export type StoredMessage = {
   query: string;
   response: string;
   status: string;
+  knowledge_answering_requested?: boolean;
+  knowledge_answering_used?: boolean;
+  fallback_reason?: string | null;
+  retrieval_query?: string | null;
+  sources?: SourceCitation[];
   created_at: string;
   updated_at: string;
+};
+
+export type SourceCitation = {
+  knowledge_document_id: string;
+  display_filename: string;
+  revision_number: number;
+  chunk_count: number;
+  excerpt: string;
+  score: number;
 };
 
 export type ConversationDetail = {
@@ -119,6 +133,10 @@ export type ChatBubble = {
   content: string;
   status: "streaming" | "completed" | "stopped" | "error";
   messageId?: number;
+  knowledgeAnsweringRequested?: boolean;
+  knowledgeAnsweringUsed?: boolean;
+  fallbackReason?: string | null;
+  sources?: SourceCitation[];
 };
 
 export type ChatStreamRequest = {
@@ -126,6 +144,7 @@ export type ChatStreamRequest = {
   conversation_id: string | number;
   message_id: number;
   message: string;
+  knowledge_answering_enabled?: boolean;
 };
 
 export type ParsedSseEvent = {

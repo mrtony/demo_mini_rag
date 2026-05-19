@@ -112,6 +112,7 @@ def _requires_schema_reset(sync_connection) -> bool:
         return True
     conversation_columns = {column["name"] for column in inspector.get_columns("conversations")}
     model_catalog_columns = {column["name"] for column in inspector.get_columns("model_catalog")}
+    message_columns = {column["name"] for column in inspector.get_columns("messages")}
     workspace_columns = {column["name"] for column in inspector.get_columns("workspaces")}
     kb_job_columns = {column["name"] for column in inspector.get_columns("knowledge_base_jobs")}
     kb_job_item_columns = (
@@ -123,6 +124,11 @@ def _requires_schema_reset(sync_connection) -> bool:
         "workspace_fk" not in conversation_columns
         or "settings_schema_json" not in model_catalog_columns
         or "settings_defaults_json" not in model_catalog_columns
+        or "knowledge_answering_requested" not in message_columns
+        or "knowledge_answering_used" not in message_columns
+        or "fallback_reason" not in message_columns
+        or "retrieval_query" not in message_columns
+        or "sources_json" not in message_columns
         or "active_knowledge_base_version_fk" not in workspace_columns
         or "job_type" not in kb_job_columns
         or "target_version_fk" not in kb_job_columns

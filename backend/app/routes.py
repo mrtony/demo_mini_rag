@@ -44,6 +44,7 @@ from .schemas import (
     KnowledgeBaseSettingsUpdateRequest,
     ModelCatalogEntry,
     ModelCatalogSummary,
+    SourceCitation,
     StoredMessage,
     WorkspaceCreateRequest,
     WorkspaceReorderRequest,
@@ -65,6 +66,7 @@ from .services.kb_job_service import (
     has_running_job,
     schedule_import_queue_processing,
 )
+from .services.turn_orchestration import plan_chat_turn
 from .sse import format_sse_event, iter_sse
 
 
@@ -431,6 +433,12 @@ async def _create_message(
     conversation_pk: int,
     user_query: str,
     openai_response_id: str | None,
+    *,
+    knowledge_answering_requested: bool = False,
+    knowledge_answering_used: bool = False,
+    fallback_reason: str | None = None,
+    retrieval_query: str | None = None,
+    sources: list[dict[str, Any]] | None = None,
 ) -> Message:
     async with SessionLocal() as session:
         message = Message(
@@ -439,6 +447,11 @@ async def _create_message(
             response="",
             openai_response_id=openai_response_id,
             status="streaming",
+            knowledge_answering_requested=knowledge_answering_requested,
+            knowledge_answering_used=knowledge_answering_used,
+            fallback_reason=fallback_reason,
+            retrieval_query=retrieval_query,
+            sources_json=json.dumps(sources or [], ensure_ascii=False),
         )
         session.add(message)
         conversation = await session.get(Conversation, conversation_pk)
@@ -462,6 +475,40 @@ async def _update_message_response(message_id: int, response_text: str, status_v
         if conversation is not None:
             conversation.updated_at = _utc_now()
         await session.commit()
+
+
+def _deserialize_sources(raw_value: str) -> list[SourceCitation]:
+    try:
+        payload = json.loads(raw_value)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(payload, list):
+        return []
+    return [
+        SourceCitation.model_validate(item)
+        for item in payload
+        if isinstance(item, dict)
+    ]
+
+
+def _build_done_event_payload(
+    *,
+    message_id: int | None,
+    status_value: str,
+    knowledge_answering_requested: bool,
+    knowledge_answering_used: bool,
+    fallback_reason: str | None,
+    emit_metadata: bool,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "message_id": message_id,
+        "status": status_value,
+    }
+    if emit_metadata:
+        payload["knowledge_answering_requested"] = knowledge_answering_requested
+        payload["knowledge_answering_used"] = knowledge_answering_used
+        payload["fallback_reason"] = fallback_reason
+    return payload
 
 
 async def _update_conversation_title(conversation_pk: int, title: str) -> Conversation | None:
@@ -735,6 +782,11 @@ async def get_conversation(
                 query=message.query,
                 response=message.response,
                 status=message.status,
+                knowledge_answering_requested=message.knowledge_answering_requested,
+                knowledge_answering_used=message.knowledge_answering_used,
+                fallback_reason=message.fallback_reason,
+                retrieval_query=message.retrieval_query,
+                sources=_deserialize_sources(message.sources_json),
                 created_at=message.created_at,
                 updated_at=message.updated_at,
             )
@@ -854,6 +906,12 @@ async def stream_chat(
             title_task = asyncio.create_task(chat_service.generate_title(payload.message))
 
         messages = await _load_conversation_messages(conversation_pk)
+        turn_plan = await plan_chat_turn(
+            workspace=workspace,
+            messages=messages,
+            user_message=payload.message,
+            knowledge_answering_enabled=payload.knowledge_answering_enabled,
+        )
 
         async def emit_title_if_ready(force: bool = False):
             nonlocal title_sent
@@ -877,7 +935,14 @@ async def stream_chat(
             )
 
         try:
-            stream = chat_service.stream_chat(messages, payload.message)
+            if turn_plan.prompt_messages is None:
+                stream = chat_service.stream_chat(messages, payload.message)
+            else:
+                stream = chat_service.stream_prompt_messages(
+                    turn_plan.prompt_messages,
+                    prompt_length=len(payload.message),
+                    history_size=len(messages),
+                )
 
             async for event in stream:
                 if stop_event.is_set():
@@ -912,6 +977,11 @@ async def stream_chat(
                         conversation_pk=conversation_pk,
                         user_query=payload.message,
                         openai_response_id=event.response_id,
+                        knowledge_answering_requested=turn_plan.knowledge_answering_requested,
+                        knowledge_answering_used=turn_plan.knowledge_answering_used,
+                        fallback_reason=turn_plan.fallback_reason,
+                        retrieval_query=turn_plan.retrieval_query,
+                        sources=turn_plan.sources,
                     )
                     message_id = message.id
                     logger.info(
@@ -928,6 +998,11 @@ async def stream_chat(
                             conversation_pk=conversation_pk,
                             user_query=payload.message,
                             openai_response_id=event.response_id,
+                            knowledge_answering_requested=turn_plan.knowledge_answering_requested,
+                            knowledge_answering_used=turn_plan.knowledge_answering_used,
+                            fallback_reason=turn_plan.fallback_reason,
+                            retrieval_query=turn_plan.retrieval_query,
+                            sources=turn_plan.sources,
                         )
                         message_id = message.id
                         yield format_sse_event("message.created", {"message_id": message.id})
@@ -942,7 +1017,13 @@ async def stream_chat(
                     )
                     continue
 
+                if event.state == ChatStreamState.SOURCES:
+                    yield format_sse_event("sources", {"sources": event.sources})
+                    continue
+
                 if event.state == ChatStreamState.COMPLETED:
+                    if turn_plan.knowledge_answering_used and turn_plan.sources:
+                        yield format_sse_event("sources", {"sources": turn_plan.sources})
                     if message_id is not None:
                         await _update_message_response(message_id, response_buffer, "completed")
                         terminal_status = "completed"
@@ -957,10 +1038,14 @@ async def stream_chat(
                         yield title_event
                     yield format_sse_event(
                         "message.done",
-                        {
-                            "message_id": message_id,
-                            "status": "completed",
-                        },
+                        _build_done_event_payload(
+                            message_id=message_id,
+                            status_value="completed",
+                            knowledge_answering_requested=turn_plan.knowledge_answering_requested,
+                            knowledge_answering_used=turn_plan.knowledge_answering_used,
+                            fallback_reason=turn_plan.fallback_reason,
+                            emit_metadata=turn_plan.emit_metadata,
+                        ),
                     )
                     return
 
@@ -997,10 +1082,14 @@ async def stream_chat(
                 yield title_event
             yield format_sse_event(
                 "message.done",
-                {
-                    "message_id": message_id,
-                    "status": "completed",
-                },
+                _build_done_event_payload(
+                    message_id=message_id,
+                    status_value="completed",
+                    knowledge_answering_requested=turn_plan.knowledge_answering_requested,
+                    knowledge_answering_used=turn_plan.knowledge_answering_used,
+                    fallback_reason=turn_plan.fallback_reason,
+                    emit_metadata=turn_plan.emit_metadata,
+                ),
             )
         except asyncio.CancelledError:
             terminal_status = terminal_status or "stopped"

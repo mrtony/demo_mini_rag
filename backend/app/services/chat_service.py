@@ -66,10 +66,20 @@ class ChatService:
 
     async def stream_chat(self, messages: list[Message], user_message: str) -> AsyncIterator[ChatEvent]:
         prompt_messages = self._prompt_builder.build_chat_messages(messages, user_message)
+        async for event in self.stream_prompt_messages(prompt_messages, prompt_length=len(user_message), history_size=len(messages)):
+            yield event
+
+    async def stream_prompt_messages(
+        self,
+        prompt_messages: list[Any],
+        *,
+        prompt_length: int,
+        history_size: int,
+    ) -> AsyncIterator[ChatEvent]:
         logger.info(
             "Starting LangChain chat stream with %s stored messages and prompt length %s",
-            len(messages),
-            len(user_message),
+            history_size,
+            prompt_length,
         )
         yield ChatEvent(state=ChatStreamState.STARTED)
 
