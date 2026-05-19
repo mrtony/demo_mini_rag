@@ -7,6 +7,7 @@ import {
   createWorkspace,
   deleteConversation,
   getDefaultWorkspaceModel,
+  getKnowledgeBaseSettings,
   getConversation,
   listArchivedWorkspaces,
   listModels,
@@ -17,6 +18,7 @@ import {
   restoreWorkspace,
   stopConversation,
   toChatBubbles,
+  updateKnowledgeBaseSettings,
   updateWorkspace,
 } from "./api";
 import {
@@ -32,6 +34,7 @@ import { readSseStream } from "./lib/sse";
 import type {
   ChatBubble,
   ConversationSummary,
+  KnowledgeBaseSettings,
   ModelCatalogEntry,
   ModelSettingSchema,
   ModelCatalogSummary,
@@ -50,11 +53,28 @@ type WorkspaceSettingsDraft = {
   modelSettings: Record<string, string | number>;
 };
 
+type KnowledgeBaseSettingsDraft = {
+  workspaceId: string;
+  chunkSize: number;
+  chunkOverlap: number;
+  retrievalTopK: number;
+  similarityThreshold: number;
+  knowledgeAnsweringDefault: boolean;
+  rebuildRequired: boolean;
+};
+
 type SettingsValidationErrors = {
   name?: string;
   systemMessage?: string;
   selectedModelId?: string;
   modelSettings: Record<string, string>;
+};
+
+type KnowledgeBaseSettingsValidationErrors = {
+  chunkSize?: string;
+  chunkOverlap?: string;
+  retrievalTopK?: string;
+  similarityThreshold?: string;
 };
 
 type ConversationMessagesById = Record<string, ChatBubble[]>;
@@ -107,6 +127,20 @@ function createSettingsDraft(workspace: WorkspaceSummary): WorkspaceSettingsDraf
     systemMessage: workspace.system_message,
     selectedModelId: workspace.selected_model.model_id,
     modelSettings: { ...(workspace.model_settings ?? {}) },
+  };
+}
+
+function createKnowledgeBaseSettingsDraft(
+  knowledgeBaseSettings: KnowledgeBaseSettings,
+): KnowledgeBaseSettingsDraft {
+  return {
+    workspaceId: knowledgeBaseSettings.workspace_id,
+    chunkSize: knowledgeBaseSettings.chunk_size,
+    chunkOverlap: knowledgeBaseSettings.chunk_overlap,
+    retrievalTopK: knowledgeBaseSettings.retrieval_top_k,
+    similarityThreshold: knowledgeBaseSettings.similarity_threshold,
+    knowledgeAnsweringDefault: knowledgeBaseSettings.knowledge_answering_default,
+    rebuildRequired: knowledgeBaseSettings.rebuild_required,
   };
 }
 
@@ -205,6 +239,35 @@ function hasValidationErrors(errors: SettingsValidationErrors): boolean {
   );
 }
 
+function getKnowledgeBaseSettingsValidationErrors(
+  draft: KnowledgeBaseSettingsDraft | null,
+): KnowledgeBaseSettingsValidationErrors {
+  if (draft === null) {
+    return {};
+  }
+
+  const errors: KnowledgeBaseSettingsValidationErrors = {};
+  if (!Number.isInteger(draft.chunkSize) || draft.chunkSize < 1) {
+    errors.chunkSize = "Chunk Size must be at least 1";
+  }
+  if (!Number.isInteger(draft.chunkOverlap) || draft.chunkOverlap < 0) {
+    errors.chunkOverlap = "Chunk Overlap cannot be negative";
+  } else if (draft.chunkOverlap >= draft.chunkSize) {
+    errors.chunkOverlap = "Chunk Overlap must be smaller than Chunk Size";
+  }
+  if (!Number.isInteger(draft.retrievalTopK) || draft.retrievalTopK < 1) {
+    errors.retrievalTopK = "Top K must be at least 1";
+  }
+  if (Number.isNaN(draft.similarityThreshold) || draft.similarityThreshold < 0 || draft.similarityThreshold > 1) {
+    errors.similarityThreshold = "Similarity Threshold must be between 0 and 1";
+  }
+  return errors;
+}
+
+function hasKnowledgeBaseValidationErrors(errors: KnowledgeBaseSettingsValidationErrors): boolean {
+  return Object.values(errors).some(Boolean);
+}
+
 function cn(...values: Array<string | false | null | undefined>): string {
   return values.filter(Boolean).join(" ");
 }
@@ -213,6 +276,9 @@ function cn(...values: Array<string | false | null | undefined>): string {
 export default function App() {
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
   const [archivedWorkspaces, setArchivedWorkspaces] = useState<WorkspaceSummary[]>([]);
+  const [knowledgeBaseSettingsByWorkspaceId, setKnowledgeBaseSettingsByWorkspaceId] = useState<
+    Record<string, KnowledgeBaseSettings>
+  >({});
   const [defaultWorkspaceModel, setDefaultWorkspaceModel] = useState<ModelCatalogSummary | null>(null);
   const [modelCatalog, setModelCatalog] = useState<ModelCatalogEntry[]>([]);
   const [conversationSummariesByWorkspaceId, setConversationSummariesByWorkspaceId] = useState<
@@ -230,7 +296,10 @@ export default function App() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [settingsDraft, setSettingsDraft] = useState<WorkspaceSettingsDraft | null>(null);
-  const [activeSettingsTab, setActiveSettingsTab] = useState<"general" | "model">("general");
+  const [knowledgeBaseSettingsDraft, setKnowledgeBaseSettingsDraft] = useState<KnowledgeBaseSettingsDraft | null>(null);
+  const [isKnowledgeBaseSettingsLoading, setIsKnowledgeBaseSettingsLoading] = useState(false);
+  const [isKnowledgeBaseManagementOpen, setIsKnowledgeBaseManagementOpen] = useState(false);
+  const [activeSettingsTab, setActiveSettingsTab] = useState<"general" | "model" | "knowledgeBase">("general");
   const abortRef = useRef<AbortController | null>(null);
   const activeWorkspaceIdRef = useRef<string | null>(null);
   const activeConversationIdRef = useRef<string | null>(null);
@@ -253,6 +322,8 @@ export default function App() {
       setActiveConversationId(null);
       setIsSettingsOpen(false);
       setSettingsDraft(null);
+      setKnowledgeBaseSettingsDraft(null);
+      setIsKnowledgeBaseManagementOpen(false);
       setActiveSettingsTab("general");
       return;
     }
@@ -390,6 +461,30 @@ export default function App() {
     }
   }
 
+  async function loadKnowledgeBaseSettings(workspaceId: string) {
+    try {
+      setIsKnowledgeBaseSettingsLoading(true);
+      const data = {
+        ...(await getKnowledgeBaseSettings(workspaceId)),
+        workspace_id: workspaceId,
+      };
+      setKnowledgeBaseSettingsByWorkspaceId((current) => ({
+        ...current,
+        [workspaceId]: data,
+      }));
+      setKnowledgeBaseSettingsDraft((current) => {
+        if (current !== null && current.workspaceId === workspaceId) {
+          return current;
+        }
+        return createKnowledgeBaseSettingsDraft(data);
+      });
+    } catch (error) {
+      setErrorMessage(getErrorMessage(error));
+    } finally {
+      setIsKnowledgeBaseSettingsLoading(false);
+    }
+  }
+
   async function loadConversation(conversationId: string) {
     if (!canLeaveSettingsView()) {
       return;
@@ -398,6 +493,8 @@ export default function App() {
       setErrorMessage(null);
       setIsSettingsOpen(false);
       setSettingsDraft(null);
+      setKnowledgeBaseSettingsDraft(null);
+      setIsKnowledgeBaseManagementOpen(false);
       setActiveSettingsTab("general");
       setActiveConversationId(conversationId);
 
@@ -447,6 +544,8 @@ export default function App() {
     }
     setIsSettingsOpen(false);
     setSettingsDraft(null);
+    setKnowledgeBaseSettingsDraft(null);
+    setIsKnowledgeBaseManagementOpen(false);
     setActiveSettingsTab("general");
     setActiveConversationId(null);
     setDraft("");
@@ -462,6 +561,8 @@ export default function App() {
     }
     setIsSettingsOpen(false);
     setSettingsDraft(null);
+    setKnowledgeBaseSettingsDraft(null);
+    setIsKnowledgeBaseManagementOpen(false);
     setActiveSettingsTab("general");
     setActiveWorkspaceId(workspaceId);
     setActiveConversationId(null);
@@ -480,6 +581,8 @@ export default function App() {
       if (activeWorkspaceId === workspaceId) {
         setIsSettingsOpen(false);
         setSettingsDraft(null);
+        setKnowledgeBaseSettingsDraft(null);
+        setIsKnowledgeBaseManagementOpen(false);
         setActiveSettingsTab("general");
         setActiveWorkspaceId(remainingWorkspaces[0]?.workspace_id ?? null);
         setActiveConversationId(null);
@@ -502,6 +605,7 @@ export default function App() {
       }));
       setActiveWorkspaceId(restoredWorkspace.workspace_id);
       setActiveConversationId(null);
+      setIsKnowledgeBaseManagementOpen(false);
       setDraft("");
     } catch (error) {
       setErrorMessage(getErrorMessage(error));
@@ -777,10 +881,13 @@ export default function App() {
     settingsDraft === null
       ? null
       : workspaces.find((item) => item.workspace_id === settingsDraft.workspaceId) ?? activeWorkspace;
+  const savedKnowledgeBaseSettings =
+    settingsDraft === null ? null : knowledgeBaseSettingsByWorkspaceId[settingsDraft.workspaceId] ?? null;
   const settingsSelectedModel =
     settingsDraft === null ? null : modelCatalogById.get(settingsDraft.selectedModelId) ?? null;
   const settingsValidationErrors = getSettingsValidationErrors(settingsDraft, modelCatalog);
-  const hasPendingSettings =
+  const knowledgeBaseSettingsValidationErrors = getKnowledgeBaseSettingsValidationErrors(knowledgeBaseSettingsDraft);
+  const hasPendingWorkspaceSettings =
     settingsDraft !== null &&
     settingsWorkspace !== null &&
     (settingsDraft.name !== settingsWorkspace.name ||
@@ -788,7 +895,20 @@ export default function App() {
       settingsDraft.selectedModelId !== settingsWorkspace.selected_model.model_id ||
       JSON.stringify(normalizeModelSettings(settingsDraft.modelSettings)) !==
         JSON.stringify(normalizeModelSettings(settingsWorkspace.model_settings)));
-  const canSaveSettings = hasPendingSettings && !hasValidationErrors(settingsValidationErrors);
+  const hasPendingKnowledgeBaseSettings =
+    knowledgeBaseSettingsDraft !== null &&
+    savedKnowledgeBaseSettings !== null &&
+    (knowledgeBaseSettingsDraft.chunkSize !== savedKnowledgeBaseSettings.chunk_size ||
+      knowledgeBaseSettingsDraft.chunkOverlap !== savedKnowledgeBaseSettings.chunk_overlap ||
+      knowledgeBaseSettingsDraft.retrievalTopK !== savedKnowledgeBaseSettings.retrieval_top_k ||
+      knowledgeBaseSettingsDraft.similarityThreshold !== savedKnowledgeBaseSettings.similarity_threshold ||
+      knowledgeBaseSettingsDraft.knowledgeAnsweringDefault !==
+        savedKnowledgeBaseSettings.knowledge_answering_default);
+  const hasPendingSettings = hasPendingWorkspaceSettings || hasPendingKnowledgeBaseSettings;
+  const canSaveSettings =
+    hasPendingSettings &&
+    !hasValidationErrors(settingsValidationErrors) &&
+    !hasKnowledgeBaseValidationErrors(knowledgeBaseSettingsValidationErrors);
   const visibleConversations = activeWorkspaceId ? conversationSummariesByWorkspaceId[activeWorkspaceId] ?? [] : [];
   const activeMessages =
     activeConversationId === null
@@ -815,7 +935,7 @@ export default function App() {
     settingsSelectedModel === null;
 
   function canLeaveSettingsView(): boolean {
-    if (!isSettingsOpen || !hasPendingSettings) {
+    if ((!isSettingsOpen && !isKnowledgeBaseManagementOpen) || !hasPendingSettings) {
       return true;
     }
     return window.confirm("Discard pending settings?");
@@ -827,8 +947,14 @@ export default function App() {
     }
     setErrorMessage(null);
     setActiveSettingsTab("general");
+    setIsKnowledgeBaseManagementOpen(false);
     setIsSettingsOpen(true);
     setSettingsDraft(createSettingsDraft(activeWorkspace));
+    const cachedKnowledgeBaseSettings = knowledgeBaseSettingsByWorkspaceId[activeWorkspace.workspace_id];
+    setKnowledgeBaseSettingsDraft(
+      cachedKnowledgeBaseSettings ? createKnowledgeBaseSettingsDraft(cachedKnowledgeBaseSettings) : null,
+    );
+    void loadKnowledgeBaseSettings(activeWorkspace.workspace_id);
   }
 
   function closeWorkspaceSettings() {
@@ -836,8 +962,40 @@ export default function App() {
       return;
     }
     setIsSettingsOpen(false);
+    setIsKnowledgeBaseManagementOpen(false);
     setSettingsDraft(null);
+    setKnowledgeBaseSettingsDraft(null);
     setActiveSettingsTab("general");
+  }
+
+  function openKnowledgeBaseManagement() {
+    if (activeWorkspace === null) {
+      return;
+    }
+    if (!canLeaveSettingsView()) {
+      return;
+    }
+    setIsSettingsOpen(false);
+    setIsKnowledgeBaseManagementOpen(true);
+    setSettingsDraft(null);
+    setKnowledgeBaseSettingsDraft(null);
+    setActiveSettingsTab("knowledgeBase");
+  }
+
+  function backToWorkspaceSettingsFromKnowledgeBaseManagement() {
+    if (activeWorkspace === null) {
+      return;
+    }
+    setErrorMessage(null);
+    setIsKnowledgeBaseManagementOpen(false);
+    setIsSettingsOpen(true);
+    setSettingsDraft(createSettingsDraft(activeWorkspace));
+    const cachedKnowledgeBaseSettings = knowledgeBaseSettingsByWorkspaceId[activeWorkspace.workspace_id];
+    setKnowledgeBaseSettingsDraft(
+      cachedKnowledgeBaseSettings ? createKnowledgeBaseSettingsDraft(cachedKnowledgeBaseSettings) : null,
+    );
+    setActiveSettingsTab("knowledgeBase");
+    void loadKnowledgeBaseSettings(activeWorkspace.workspace_id);
   }
 
   function updateSelectedModel(nextModelId: string) {
@@ -869,6 +1027,22 @@ export default function App() {
     });
   }
 
+  function updateKnowledgeBaseSetting(
+    key: "chunkSize" | "chunkOverlap" | "retrievalTopK" | "similarityThreshold",
+    rawValue: string,
+  ) {
+    setKnowledgeBaseSettingsDraft((current) => {
+      if (current === null) {
+        return current;
+      }
+      const nextValue = rawValue === "" ? Number.NaN : Number(rawValue);
+      return {
+        ...current,
+        [key]: nextValue,
+      };
+    });
+  }
+
   async function saveWorkspaceSettings() {
     if (settingsDraft === null || !canSaveSettings) {
       return;
@@ -876,17 +1050,38 @@ export default function App() {
 
     try {
       setErrorMessage(null);
-      const updatedWorkspace = await updateWorkspace(settingsDraft.workspaceId, {
-        name: settingsDraft.name.trim(),
-        system_message: settingsDraft.systemMessage.trim(),
-        selected_model_id: settingsDraft.selectedModelId,
-        model_settings: normalizeModelSettings(settingsDraft.modelSettings),
-      });
-      setWorkspaces((current) =>
-        current.map((item) => (item.workspace_id === updatedWorkspace.workspace_id ? updatedWorkspace : item)),
-      );
-      setSettingsDraft(createSettingsDraft(updatedWorkspace));
-      setActiveSettingsTab("general");
+      let updatedWorkspace: WorkspaceSummary | null = null;
+      if (hasPendingWorkspaceSettings) {
+        updatedWorkspace = await updateWorkspace(settingsDraft.workspaceId, {
+          name: settingsDraft.name.trim(),
+          system_message: settingsDraft.systemMessage.trim(),
+          selected_model_id: settingsDraft.selectedModelId,
+          model_settings: normalizeModelSettings(settingsDraft.modelSettings),
+        });
+        setWorkspaces((current) =>
+          current.map((item) => (item.workspace_id === updatedWorkspace.workspace_id ? updatedWorkspace : item)),
+        );
+        setSettingsDraft(createSettingsDraft(updatedWorkspace));
+      }
+
+      if (hasPendingKnowledgeBaseSettings && knowledgeBaseSettingsDraft !== null) {
+        const updatedKnowledgeBaseSettings = await updateKnowledgeBaseSettings(settingsDraft.workspaceId, {
+          chunk_size: knowledgeBaseSettingsDraft.chunkSize,
+          chunk_overlap: knowledgeBaseSettingsDraft.chunkOverlap,
+          retrieval_top_k: knowledgeBaseSettingsDraft.retrievalTopK,
+          similarity_threshold: knowledgeBaseSettingsDraft.similarityThreshold,
+          knowledge_answering_default: knowledgeBaseSettingsDraft.knowledgeAnsweringDefault,
+        });
+        setKnowledgeBaseSettingsByWorkspaceId((current) => ({
+          ...current,
+          [updatedKnowledgeBaseSettings.workspace_id]: updatedKnowledgeBaseSettings,
+        }));
+        setKnowledgeBaseSettingsDraft(createKnowledgeBaseSettingsDraft(updatedKnowledgeBaseSettings));
+      }
+
+      if (!hasPendingWorkspaceSettings && settingsWorkspace !== null) {
+        setSettingsDraft(createSettingsDraft(settingsWorkspace));
+      }
       setIsSettingsOpen(true);
     } catch (error) {
       setErrorMessage(getErrorMessage(error));
@@ -1180,7 +1375,11 @@ export default function App() {
                   </div>
                   <div>
                     <h2 className="font-['Iowan_Old_Style','Palatino_Linotype','Noto_Serif_TC',serif] text-3xl font-semibold tracking-[-0.03em] text-stone-950">
-                      {isSettingsOpen ? "Workspace Settings" : activeTitle}
+                      {isKnowledgeBaseManagementOpen
+                        ? "Knowledge Base Management"
+                        : isSettingsOpen
+                          ? "Workspace Settings"
+                          : activeTitle}
                     </h2>
                     <p className="mt-2 text-sm text-stone-600">
                       {activeWorkspace
@@ -1193,11 +1392,27 @@ export default function App() {
                   <button
                     type="button"
                     className="secondary-button inline-flex items-center justify-center gap-2 self-start rounded-2xl border border-stone-200 bg-white/90 px-4 py-3 text-sm font-medium text-stone-700 transition duration-200 hover:-translate-y-0.5 hover:border-rose-200 hover:text-rose-500 focus:outline-none focus:ring-4 focus:ring-rose-200/70"
-                    onClick={isSettingsOpen ? closeWorkspaceSettings : openWorkspaceSettings}
-                    aria-label={isSettingsOpen ? "Back to chat" : "Open workspace settings"}
+                    onClick={
+                      isKnowledgeBaseManagementOpen
+                        ? backToWorkspaceSettingsFromKnowledgeBaseManagement
+                        : isSettingsOpen
+                          ? closeWorkspaceSettings
+                          : openWorkspaceSettings
+                    }
+                    aria-label={
+                      isKnowledgeBaseManagementOpen
+                        ? "Workspace settings"
+                        : isSettingsOpen
+                          ? "Back to chat"
+                          : "Open workspace settings"
+                    }
                   >
                     <SlidersIcon className="h-4 w-4" />
-                    {isSettingsOpen ? "Back to chat" : "Settings"}
+                    {isKnowledgeBaseManagementOpen
+                      ? "Workspace settings"
+                      : isSettingsOpen
+                        ? "Back to chat"
+                        : "Settings"}
                   </button>
                 ) : null}
               </div>
@@ -1209,7 +1424,51 @@ export default function App() {
               </div>
             ) : null}
 
-            {isSettingsOpen && settingsDraft && settingsWorkspace ? (
+            {isKnowledgeBaseManagementOpen && activeWorkspace ? (
+              <>
+                <section className="messages settings-panel chat-scrollbar overflow-y-auto px-5 py-5 md:px-8">
+                  <div className="mx-auto flex w-full max-w-4xl flex-col gap-6 rounded-[2rem] border border-white/80 bg-white/88 p-5 shadow-[0_20px_50px_rgba(28,25,23,0.08)] md:p-7">
+                    <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+                      <div>
+                        <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-stone-500">
+                          Workspace knowledge base
+                        </p>
+                        <h3 className="mt-2 font-['Iowan_Old_Style','Palatino_Linotype','Noto_Serif_TC',serif] text-2xl font-semibold tracking-[-0.03em] text-stone-950">
+                          Empty shell for documents, rebuilds, and job history
+                        </h3>
+                      </div>
+                      <div className="rounded-full bg-stone-100 px-3 py-1 text-xs text-stone-500">
+                        Management stays separate from settings edits
+                      </div>
+                    </div>
+
+                    <div className="rounded-[1.75rem] border border-dashed border-stone-300 bg-stone-50/80 px-6 py-8">
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-stone-500">
+                        Knowledge Base Management
+                      </p>
+                      <h4 className="mt-3 text-xl font-semibold tracking-[-0.02em] text-stone-950">
+                        No knowledge documents yet
+                      </h4>
+                      <p className="mt-3 max-w-2xl text-sm leading-7 text-stone-600">
+                        Import and rebuild flows will connect here in the next slices.
+                      </p>
+                    </div>
+                  </div>
+                </section>
+
+                <div className="composer settings-actions border-t border-stone-200/80 bg-[rgba(255,248,242,0.88)] px-5 py-4 md:px-8">
+                  <div className="settings-actions-row mx-auto flex w-full max-w-4xl justify-end gap-3">
+                    <button
+                      type="button"
+                      className="secondary-button rounded-2xl border border-stone-200 bg-white/90 px-4 py-3 text-sm font-medium text-stone-700 transition duration-200 hover:border-rose-200 hover:text-rose-500"
+                      onClick={backToWorkspaceSettingsFromKnowledgeBaseManagement}
+                    >
+                      Back to Workspace Settings
+                    </button>
+                  </div>
+                </div>
+              </>
+            ) : isSettingsOpen && settingsDraft && settingsWorkspace ? (
               <>
                 <section className="messages settings-panel chat-scrollbar overflow-y-auto px-5 py-5 md:px-8">
                   <div className="mx-auto flex w-full max-w-4xl flex-col gap-6 rounded-[2rem] border border-white/80 bg-white/88 p-5 shadow-[0_20px_50px_rgba(28,25,23,0.08)] md:p-7">
@@ -1219,7 +1478,7 @@ export default function App() {
                           Workspace-owned settings
                         </p>
                         <h3 className="mt-2 font-['Iowan_Old_Style','Palatino_Linotype','Noto_Serif_TC',serif] text-2xl font-semibold tracking-[-0.03em] text-stone-950">
-                          Tune tone, instructions, and model behavior
+                          Tune tone, instructions, model behavior, and retrieval defaults
                         </h3>
                       </div>
                       <div className="rounded-full bg-stone-100 px-3 py-1 text-xs text-stone-500">
@@ -1255,6 +1514,20 @@ export default function App() {
                         onClick={() => setActiveSettingsTab("model")}
                       >
                         Model
+                      </button>
+                      <button
+                        type="button"
+                        className={cn(
+                          "settings-tab rounded-full px-4 py-2 text-sm font-medium transition duration-200",
+                          activeSettingsTab === "knowledgeBase"
+                            ? "active bg-stone-950 text-stone-50"
+                            : "bg-stone-100 text-stone-600 hover:bg-rose-50 hover:text-rose-600",
+                        )}
+                        role="tab"
+                        aria-selected={activeSettingsTab === "knowledgeBase"}
+                        onClick={() => setActiveSettingsTab("knowledgeBase")}
+                      >
+                        Knowledge Base
                       </button>
                     </div>
 
@@ -1300,7 +1573,7 @@ export default function App() {
                           ) : null}
                         </div>
                       </div>
-                    ) : (
+                    ) : activeSettingsTab === "model" ? (
                       <div className="grid gap-5">
                         <div className="settings-field">
                           <label htmlFor="selected-model-input" className="mb-2 block text-sm font-medium text-stone-700">
@@ -1377,6 +1650,140 @@ export default function App() {
                             Select an enabled model to review the available Model-specific Settings.
                           </div>
                         )}
+                      </div>
+                    ) : isKnowledgeBaseSettingsLoading && knowledgeBaseSettingsDraft === null ? (
+                      <div className="settings-hint rounded-[1.25rem] border border-dashed border-stone-300 bg-stone-50/80 px-4 py-4 text-sm text-stone-500">
+                        Loading Knowledge Base Settings...
+                      </div>
+                    ) : knowledgeBaseSettingsDraft ? (
+                      <div className="grid gap-5">
+                        {knowledgeBaseSettingsDraft.rebuildRequired ? (
+                          <div className="rounded-[1.25rem] border border-amber-200 bg-amber-50 px-4 py-4 text-sm text-amber-900">
+                            <div className="font-semibold">Rebuild Required</div>
+                            <div className="mt-1">
+                              Chunking settings changed. Rebuild the Knowledge Base when you're ready.
+                            </div>
+                          </div>
+                        ) : null}
+
+                        <div className="settings-field">
+                          <label htmlFor="kb-chunk-size-input" className="mb-2 block text-sm font-medium text-stone-700">
+                            Chunk Size
+                          </label>
+                          <input
+                            id="kb-chunk-size-input"
+                            className="w-full rounded-[1.25rem] border border-stone-200 bg-stone-50 px-4 py-3 text-sm text-stone-900 outline-none transition duration-200 focus:border-rose-300 focus:bg-white focus:ring-4 focus:ring-rose-200/60"
+                            type="number"
+                            min={1}
+                            step={1}
+                            value={String(knowledgeBaseSettingsDraft.chunkSize)}
+                            onChange={(nextEvent) => updateKnowledgeBaseSetting("chunkSize", nextEvent.target.value)}
+                            aria-label="Chunk Size"
+                          />
+                          {knowledgeBaseSettingsValidationErrors.chunkSize ? (
+                            <div className="field-error mt-2 text-sm text-rose-700">
+                              {knowledgeBaseSettingsValidationErrors.chunkSize}
+                            </div>
+                          ) : null}
+                        </div>
+
+                        <div className="settings-field">
+                          <label htmlFor="kb-chunk-overlap-input" className="mb-2 block text-sm font-medium text-stone-700">
+                            Chunk Overlap
+                          </label>
+                          <input
+                            id="kb-chunk-overlap-input"
+                            className="w-full rounded-[1.25rem] border border-stone-200 bg-stone-50 px-4 py-3 text-sm text-stone-900 outline-none transition duration-200 focus:border-rose-300 focus:bg-white focus:ring-4 focus:ring-rose-200/60"
+                            type="number"
+                            min={0}
+                            step={1}
+                            value={String(knowledgeBaseSettingsDraft.chunkOverlap)}
+                            onChange={(nextEvent) => updateKnowledgeBaseSetting("chunkOverlap", nextEvent.target.value)}
+                            aria-label="Chunk Overlap"
+                          />
+                          {knowledgeBaseSettingsValidationErrors.chunkOverlap ? (
+                            <div className="field-error mt-2 text-sm text-rose-700">
+                              {knowledgeBaseSettingsValidationErrors.chunkOverlap}
+                            </div>
+                          ) : null}
+                        </div>
+
+                        <div className="settings-field">
+                          <label htmlFor="kb-top-k-input" className="mb-2 block text-sm font-medium text-stone-700">
+                            Top K
+                          </label>
+                          <input
+                            id="kb-top-k-input"
+                            className="w-full rounded-[1.25rem] border border-stone-200 bg-stone-50 px-4 py-3 text-sm text-stone-900 outline-none transition duration-200 focus:border-rose-300 focus:bg-white focus:ring-4 focus:ring-rose-200/60"
+                            type="number"
+                            min={1}
+                            step={1}
+                            value={String(knowledgeBaseSettingsDraft.retrievalTopK)}
+                            onChange={(nextEvent) => updateKnowledgeBaseSetting("retrievalTopK", nextEvent.target.value)}
+                            aria-label="Top K"
+                          />
+                          {knowledgeBaseSettingsValidationErrors.retrievalTopK ? (
+                            <div className="field-error mt-2 text-sm text-rose-700">
+                              {knowledgeBaseSettingsValidationErrors.retrievalTopK}
+                            </div>
+                          ) : null}
+                        </div>
+
+                        <div className="settings-field">
+                          <label htmlFor="kb-similarity-threshold-input" className="mb-2 block text-sm font-medium text-stone-700">
+                            Similarity Threshold
+                          </label>
+                          <input
+                            id="kb-similarity-threshold-input"
+                            className="w-full rounded-[1.25rem] border border-stone-200 bg-stone-50 px-4 py-3 text-sm text-stone-900 outline-none transition duration-200 focus:border-rose-300 focus:bg-white focus:ring-4 focus:ring-rose-200/60"
+                            type="number"
+                            min={0}
+                            max={1}
+                            step={0.05}
+                            value={String(knowledgeBaseSettingsDraft.similarityThreshold)}
+                            onChange={(nextEvent) => updateKnowledgeBaseSetting("similarityThreshold", nextEvent.target.value)}
+                            aria-label="Similarity Threshold"
+                          />
+                          {knowledgeBaseSettingsValidationErrors.similarityThreshold ? (
+                            <div className="field-error mt-2 text-sm text-rose-700">
+                              {knowledgeBaseSettingsValidationErrors.similarityThreshold}
+                            </div>
+                          ) : null}
+                        </div>
+
+                        <label className="flex items-center gap-3 rounded-[1.25rem] border border-stone-200 bg-stone-50 px-4 py-4 text-sm text-stone-700">
+                          <input
+                            type="checkbox"
+                            checked={knowledgeBaseSettingsDraft.knowledgeAnsweringDefault}
+                            onChange={(nextEvent) =>
+                              setKnowledgeBaseSettingsDraft((current) =>
+                                current === null
+                                  ? current
+                                  : { ...current, knowledgeAnsweringDefault: nextEvent.target.checked },
+                              )
+                            }
+                            aria-label="Knowledge Answering Default"
+                          />
+                          <span>Knowledge Answering Default</span>
+                        </label>
+
+                        <div className="rounded-[1.25rem] border border-stone-200 bg-[#f6efe6] px-4 py-4 text-sm text-stone-600">
+                          Use this tab for workspace-owned retrieval defaults, then switch to management for files and jobs.
+                        </div>
+
+                        <div>
+                          <button
+                            type="button"
+                            className="secondary-button rounded-2xl border border-stone-200 bg-white/90 px-4 py-3 text-sm font-medium text-stone-700 transition duration-200 hover:border-rose-200 hover:text-rose-500"
+                            onClick={openKnowledgeBaseManagement}
+                          >
+                            Open Knowledge Base Management
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="settings-hint rounded-[1.25rem] border border-dashed border-stone-300 bg-stone-50/80 px-4 py-4 text-sm text-stone-500">
+                        Knowledge Base Settings are unavailable right now.
                       </div>
                     )}
 

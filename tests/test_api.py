@@ -9,7 +9,12 @@ from backend.app.chat_events import ChatEvent, ChatStreamState
 from backend.app import db as db_module
 from backend.app.config import get_settings
 from backend.app.main import app
-from backend.app.models import ModelCatalog, Workspace, WorkspaceModelSetting
+from backend.app.models import (
+    ModelCatalog,
+    Workspace,
+    WorkspaceKnowledgeBaseSetting,
+    WorkspaceModelSetting,
+)
 from backend.app.routes import get_chat_service
 
 
@@ -297,6 +302,90 @@ async def test_updates_workspace_settings_with_model_validation_and_obsolete_cle
     assert blank_system_message_response.status_code == 422
     assert invalid_model_setting_response.status_code == 422
     assert disabled_model_response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_workspace_owns_default_knowledge_base_settings(test_client):
+    workspace = await create_workspace(test_client, "Workspace KB")
+
+    response = await test_client.get(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base-settings"
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "workspace_id": workspace["workspace_id"],
+        "chunk_size": 800,
+        "chunk_overlap": 200,
+        "retrieval_top_k": 8,
+        "similarity_threshold": 0.2,
+        "knowledge_answering_default": False,
+        "rebuild_required": False,
+    }
+
+    async with db_module.SessionLocal() as session:
+        result = await session.execute(
+            select(WorkspaceKnowledgeBaseSetting).join(Workspace).where(
+                Workspace.workspace_id == workspace["workspace_id"]
+            )
+        )
+        stored_settings = result.scalar_one()
+
+    assert stored_settings.chunk_size == 800
+    assert stored_settings.chunk_overlap == 200
+    assert stored_settings.retrieval_top_k == 8
+    assert stored_settings.similarity_threshold == 0.2
+    assert stored_settings.knowledge_answering_default is False
+    assert stored_settings.rebuild_required is False
+
+
+@pytest.mark.asyncio
+async def test_updates_knowledge_base_settings_and_only_ingestion_changes_require_rebuild(test_client):
+    workspace = await create_workspace(test_client, "Workspace KB")
+
+    retrieval_only_response = await test_client.put(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base-settings",
+        json={
+            "chunk_size": 800,
+            "chunk_overlap": 200,
+            "retrieval_top_k": 12,
+            "similarity_threshold": 0.35,
+            "knowledge_answering_default": True,
+        },
+    )
+
+    assert retrieval_only_response.status_code == 200
+    assert retrieval_only_response.json() == {
+        "workspace_id": workspace["workspace_id"],
+        "chunk_size": 800,
+        "chunk_overlap": 200,
+        "retrieval_top_k": 12,
+        "similarity_threshold": 0.35,
+        "knowledge_answering_default": True,
+        "rebuild_required": False,
+    }
+
+    ingestion_change_response = await test_client.put(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base-settings",
+        json={
+            "chunk_size": 1000,
+            "chunk_overlap": 250,
+            "retrieval_top_k": 12,
+            "similarity_threshold": 0.35,
+            "knowledge_answering_default": True,
+        },
+    )
+
+    assert ingestion_change_response.status_code == 200
+    assert ingestion_change_response.json() == {
+        "workspace_id": workspace["workspace_id"],
+        "chunk_size": 1000,
+        "chunk_overlap": 250,
+        "retrieval_top_k": 12,
+        "similarity_threshold": 0.35,
+        "knowledge_answering_default": True,
+        "rebuild_required": True,
+    }
 
 
 @pytest.mark.asyncio

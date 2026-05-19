@@ -17,11 +17,20 @@ from sqlalchemy.orm import selectinload
 from .chat_events import ChatStreamState
 from .config import Settings, get_settings
 from .db import SessionLocal, get_db_session
-from .models import Conversation, Message, ModelCatalog, Workspace, WorkspaceModelSetting
+from .models import (
+    Conversation,
+    Message,
+    ModelCatalog,
+    Workspace,
+    WorkspaceKnowledgeBaseSetting,
+    WorkspaceModelSetting,
+)
 from .schemas import (
     ChatStreamRequest,
     ConversationDetail,
     ConversationSummary,
+    KnowledgeBaseSettingsSummary,
+    KnowledgeBaseSettingsUpdateRequest,
     ModelCatalogEntry,
     ModelCatalogSummary,
     StoredMessage,
@@ -127,6 +136,20 @@ def _serialize_workspace(workspace: Workspace) -> WorkspaceSummary:
     )
 
 
+def _serialize_knowledge_base_settings(
+    settings: WorkspaceKnowledgeBaseSetting,
+) -> KnowledgeBaseSettingsSummary:
+    return KnowledgeBaseSettingsSummary(
+        workspace_id=settings.workspace.workspace_id,
+        chunk_size=settings.chunk_size,
+        chunk_overlap=settings.chunk_overlap,
+        retrieval_top_k=settings.retrieval_top_k,
+        similarity_threshold=settings.similarity_threshold,
+        knowledge_answering_default=settings.knowledge_answering_default,
+        rebuild_required=settings.rebuild_required,
+    )
+
+
 def _serialize_conversation_summary(conversation: Conversation) -> ConversationSummary:
     return ConversationSummary(
         workspace_id=conversation.workspace.workspace_id,
@@ -155,6 +178,7 @@ async def _load_workspace_by_public_id_or_404(
         .options(
             selectinload(Workspace.selected_model),
             selectinload(Workspace.model_settings),
+            selectinload(Workspace.knowledge_base_setting),
         )
         .execution_options(populate_existing=True)
         .where(*conditions)
@@ -302,6 +326,29 @@ async def _replace_workspace_model_settings(
         )
 
 
+def _build_default_knowledge_base_settings(workspace_fk: int) -> WorkspaceKnowledgeBaseSetting:
+    return WorkspaceKnowledgeBaseSetting(
+        workspace_fk=workspace_fk,
+        chunk_size=800,
+        chunk_overlap=200,
+        retrieval_top_k=8,
+        similarity_threshold=0.2,
+        knowledge_answering_default=False,
+        rebuild_required=False,
+    )
+
+
+def _get_workspace_knowledge_base_setting_or_500(
+    workspace: Workspace,
+) -> WorkspaceKnowledgeBaseSetting:
+    if workspace.knowledge_base_setting is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Knowledge Base Settings are not configured for this Workspace",
+        )
+    return workspace.knowledge_base_setting
+
+
 async def _create_message(
     conversation_pk: int,
     user_query: str,
@@ -371,6 +418,7 @@ async def list_workspaces(session: AsyncSession = Depends(get_db_session)) -> li
         .options(
             selectinload(Workspace.selected_model),
             selectinload(Workspace.model_settings),
+            selectinload(Workspace.knowledge_base_setting),
         )
         .where(Workspace.is_archived.is_(False))
         .order_by(Workspace.sort_order.asc(), Workspace.id.asc())
@@ -387,6 +435,7 @@ async def list_archived_workspaces(
         .options(
             selectinload(Workspace.selected_model),
             selectinload(Workspace.model_settings),
+            selectinload(Workspace.knowledge_base_setting),
         )
         .where(Workspace.is_archived.is_(True))
         .order_by(Workspace.sort_order.asc(), Workspace.id.asc())
@@ -429,6 +478,7 @@ async def create_workspace(
     session.add(workspace)
     await session.flush()
     await _replace_workspace_model_settings(session, workspace, _model_settings_defaults(default_model))
+    session.add(_build_default_knowledge_base_settings(workspace.id))
     await session.commit()
 
     created_workspace = await _load_workspace_or_404(session, workspace.workspace_id)
@@ -453,6 +503,51 @@ async def update_workspace(
 
     updated_workspace = await _load_workspace_or_404(session, workspace_id)
     return _serialize_workspace(updated_workspace)
+
+
+@router.get(
+    "/workspaces/{workspace_id}/knowledge-base-settings",
+    response_model=KnowledgeBaseSettingsSummary,
+)
+async def get_workspace_knowledge_base_settings(
+    workspace_id: str,
+    session: AsyncSession = Depends(get_db_session),
+) -> KnowledgeBaseSettingsSummary:
+    workspace = await _load_workspace_or_404(session, workspace_id)
+    knowledge_base_setting = _get_workspace_knowledge_base_setting_or_500(workspace)
+    return _serialize_knowledge_base_settings(knowledge_base_setting)
+
+
+@router.put(
+    "/workspaces/{workspace_id}/knowledge-base-settings",
+    response_model=KnowledgeBaseSettingsSummary,
+)
+async def update_workspace_knowledge_base_settings(
+    workspace_id: str,
+    payload: KnowledgeBaseSettingsUpdateRequest,
+    session: AsyncSession = Depends(get_db_session),
+) -> KnowledgeBaseSettingsSummary:
+    workspace = await _load_workspace_or_404(session, workspace_id)
+    knowledge_base_setting = _get_workspace_knowledge_base_setting_or_500(workspace)
+
+    ingestion_settings_changed = (
+        knowledge_base_setting.chunk_size != payload.chunk_size
+        or knowledge_base_setting.chunk_overlap != payload.chunk_overlap
+    )
+
+    knowledge_base_setting.chunk_size = payload.chunk_size
+    knowledge_base_setting.chunk_overlap = payload.chunk_overlap
+    knowledge_base_setting.retrieval_top_k = payload.retrieval_top_k
+    knowledge_base_setting.similarity_threshold = payload.similarity_threshold
+    knowledge_base_setting.knowledge_answering_default = payload.knowledge_answering_default
+    if ingestion_settings_changed:
+        knowledge_base_setting.rebuild_required = True
+    knowledge_base_setting.updated_at = _utc_now()
+    await session.commit()
+
+    updated_workspace = await _load_workspace_or_404(session, workspace_id)
+    updated_setting = _get_workspace_knowledge_base_setting_or_500(updated_workspace)
+    return _serialize_knowledge_base_settings(updated_setting)
 
 
 @router.post("/workspaces/reorder", response_model=list[WorkspaceSummary])

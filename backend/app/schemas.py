@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class ChatStreamRequest(BaseModel):
@@ -64,6 +64,20 @@ class WorkspaceReorderRequest(BaseModel):
     workspace_ids: list[str] = Field(min_length=1)
 
 
+class KnowledgeBaseSettingsUpdateRequest(BaseModel):
+    chunk_size: int = Field(ge=1)
+    chunk_overlap: int = Field(ge=0)
+    retrieval_top_k: int = Field(ge=1)
+    similarity_threshold: float = Field(ge=0, le=1)
+    knowledge_answering_default: bool = False
+
+    @model_validator(mode="after")
+    def validate_chunk_overlap(self) -> "KnowledgeBaseSettingsUpdateRequest":
+        if self.chunk_overlap >= self.chunk_size:
+            raise ValueError("Chunk Overlap must be smaller than Chunk Size")
+        return self
+
+
 class WorkspaceSummary(BaseModel):
     workspace_id: str
     name: str
@@ -73,6 +87,16 @@ class WorkspaceSummary(BaseModel):
     sort_order: int
     created_at: datetime
     updated_at: datetime
+
+
+class KnowledgeBaseSettingsSummary(BaseModel):
+    workspace_id: str
+    chunk_size: int
+    chunk_overlap: int
+    retrieval_top_k: int
+    similarity_threshold: float
+    knowledge_answering_default: bool
+    rebuild_required: bool
 
 
 class ConversationSummary(BaseModel):

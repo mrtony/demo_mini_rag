@@ -38,6 +38,16 @@ export type WorkspaceSummary = {
   updated_at: string;
 };
 
+export type KnowledgeBaseSettings = {
+  workspace_id: string;
+  chunk_size: number;
+  chunk_overlap: number;
+  retrieval_top_k: number;
+  similarity_threshold: number;
+  knowledge_answering_default: boolean;
+  rebuild_required: boolean;
+};
+
 export type ConversationSummary = {
   workspace_id: string;
   conversation_id: string;

@@ -3,6 +3,7 @@ import type {
   ChatStreamRequest,
   ConversationDetail,
   ConversationSummary,
+  KnowledgeBaseSettings,
   ModelCatalogEntry,
   ModelCatalogSummary,
   StoredMessage,
@@ -65,6 +66,31 @@ export async function updateWorkspace(
     body: JSON.stringify(payload),
   });
   return expectJson<WorkspaceSummary>(response);
+}
+
+export async function getKnowledgeBaseSettings(workspaceId: string): Promise<KnowledgeBaseSettings> {
+  const response = await fetch(`${API_BASE}/api/workspaces/${workspaceId}/knowledge-base-settings`);
+  return expectJson<KnowledgeBaseSettings>(response);
+}
+
+export async function updateKnowledgeBaseSettings(
+  workspaceId: string,
+  payload: {
+    chunk_size: number;
+    chunk_overlap: number;
+    retrieval_top_k: number;
+    similarity_threshold: number;
+    knowledge_answering_default: boolean;
+  },
+): Promise<KnowledgeBaseSettings> {
+  const response = await fetch(`${API_BASE}/api/workspaces/${workspaceId}/knowledge-base-settings`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+  return expectJson<KnowledgeBaseSettings>(response);
 }
 
 export async function reorderWorkspaces(workspaceIds: string[]): Promise<WorkspaceSummary[]> {

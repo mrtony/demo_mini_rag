@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
@@ -59,6 +59,12 @@ class Workspace(Base):
         order_by="WorkspaceModelSetting.setting_key",
         lazy="selectin",
     )
+    knowledge_base_setting: Mapped["WorkspaceKnowledgeBaseSetting | None"] = relationship(
+        back_populates="workspace",
+        cascade="all, delete-orphan",
+        uselist=False,
+        lazy="selectin",
+    )
     conversations: Mapped[list["Conversation"]] = relationship(
         back_populates="workspace",
         cascade="all, delete-orphan",
@@ -87,6 +93,34 @@ class WorkspaceModelSetting(Base):
     )
 
     workspace: Mapped[Workspace] = relationship(back_populates="model_settings", lazy="selectin")
+
+
+class WorkspaceKnowledgeBaseSetting(Base):
+    __tablename__ = "workspace_knowledge_base_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    workspace_fk: Mapped[int] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        unique=True,
+        index=True,
+    )
+    chunk_size: Mapped[int] = mapped_column(Integer, default=800)
+    chunk_overlap: Mapped[int] = mapped_column(Integer, default=200)
+    retrieval_top_k: Mapped[int] = mapped_column(Integer, default=8)
+    similarity_threshold: Mapped[float] = mapped_column(Float, default=0.2)
+    knowledge_answering_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    rebuild_required: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    workspace: Mapped[Workspace] = relationship(back_populates="knowledge_base_setting", lazy="selectin")
 
 
 class Conversation(Base):

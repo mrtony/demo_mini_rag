@@ -7,6 +7,7 @@ import {
   createWorkspace,
   deleteConversation,
   getDefaultWorkspaceModel,
+  getKnowledgeBaseSettings,
   getConversation,
   listArchivedWorkspaces,
   listModels,
@@ -16,6 +17,7 @@ import {
   reorderWorkspaces,
   restoreWorkspace,
   stopConversation,
+  updateKnowledgeBaseSettings,
   updateWorkspace,
 } from "./api";
 import { readSseStream } from "./lib/sse";
@@ -25,6 +27,7 @@ vi.mock("./api", () => ({
   createWorkspace: vi.fn(),
   deleteConversation: vi.fn(),
   getDefaultWorkspaceModel: vi.fn(),
+  getKnowledgeBaseSettings: vi.fn(),
   getConversation: vi.fn(),
   listArchivedWorkspaces: vi.fn(),
   listModels: vi.fn(),
@@ -34,6 +37,7 @@ vi.mock("./api", () => ({
   reorderWorkspaces: vi.fn(),
   restoreWorkspace: vi.fn(),
   stopConversation: vi.fn(),
+  updateKnowledgeBaseSettings: vi.fn(),
   updateWorkspace: vi.fn(),
   toChatBubbles: (messages: Array<{ id: number; query: string; response: string; status: string }>) =>
     messages.flatMap((message) => [
@@ -62,6 +66,7 @@ vi.mock("./lib/sse", () => ({
 const mockedCreateWorkspace = vi.mocked(createWorkspace);
 const mockedDeleteConversation = vi.mocked(deleteConversation);
 const mockedGetDefaultWorkspaceModel = vi.mocked(getDefaultWorkspaceModel);
+const mockedGetKnowledgeBaseSettings = vi.mocked(getKnowledgeBaseSettings);
 const mockedGetConversation = vi.mocked(getConversation);
 const mockedArchiveWorkspace = vi.mocked(archiveWorkspace);
 const mockedListArchivedWorkspaces = vi.mocked(listArchivedWorkspaces);
@@ -72,6 +77,7 @@ const mockedOpenChatStream = vi.mocked(openChatStream);
 const mockedReorderWorkspaces = vi.mocked(reorderWorkspaces);
 const mockedRestoreWorkspace = vi.mocked(restoreWorkspace);
 const mockedStopConversation = vi.mocked(stopConversation);
+const mockedUpdateKnowledgeBaseSettings = vi.mocked(updateKnowledgeBaseSettings);
 const mockedUpdateWorkspace = vi.mocked(updateWorkspace);
 const mockedReadSseStream = vi.mocked(readSseStream);
 
@@ -81,6 +87,7 @@ describe("App", () => {
     mockedCreateWorkspace.mockReset();
     mockedDeleteConversation.mockReset();
     mockedGetDefaultWorkspaceModel.mockReset();
+    mockedGetKnowledgeBaseSettings.mockReset();
     mockedGetConversation.mockReset();
     mockedListArchivedWorkspaces.mockReset();
     mockedListModels.mockReset();
@@ -90,9 +97,28 @@ describe("App", () => {
     mockedReorderWorkspaces.mockReset();
     mockedRestoreWorkspace.mockReset();
     mockedStopConversation.mockReset();
+    mockedUpdateKnowledgeBaseSettings.mockReset();
     mockedUpdateWorkspace.mockReset();
     mockedReadSseStream.mockReset();
     mockedListArchivedWorkspaces.mockResolvedValue([]);
+    mockedGetKnowledgeBaseSettings.mockResolvedValue({
+      workspace_id: "ws-default",
+      chunk_size: 800,
+      chunk_overlap: 200,
+      retrieval_top_k: 8,
+      similarity_threshold: 0.2,
+      knowledge_answering_default: false,
+      rebuild_required: false,
+    });
+    mockedUpdateKnowledgeBaseSettings.mockResolvedValue({
+      workspace_id: "ws-default",
+      chunk_size: 800,
+      chunk_overlap: 200,
+      retrieval_top_k: 8,
+      similarity_threshold: 0.2,
+      knowledge_answering_default: false,
+      rebuild_required: false,
+    });
     mockedStopConversation.mockResolvedValue(undefined);
     mockedDeleteConversation.mockResolvedValue(undefined);
     mockedListModels.mockResolvedValue([
@@ -944,6 +970,123 @@ describe("App", () => {
         temperature: 0.4,
       },
     });
+  });
+
+  it("keeps knowledge base settings pending until explicit save and shows rebuild required after ingestion changes", async () => {
+    const user = userEvent.setup();
+
+    mockedListWorkspaces.mockResolvedValue([
+      {
+        workspace_id: "ws-kb",
+        name: "Workspace KB",
+        system_message: "System message",
+        selected_model: {
+          model_id: "gpt-5.4-nano",
+          label: "gpt-5.4-nano",
+          is_enabled: true,
+          is_default_workspace_model: true,
+        },
+        model_settings: {
+          temperature: 0.7,
+        },
+        created_at: "2026-05-15T00:00:00Z",
+        updated_at: "2026-05-15T00:00:00Z",
+      },
+    ]);
+    mockedListWorkspaceConversations.mockResolvedValue([]);
+    mockedGetKnowledgeBaseSettings.mockResolvedValue({
+      workspace_id: "ws-kb",
+      chunk_size: 800,
+      chunk_overlap: 200,
+      retrieval_top_k: 8,
+      similarity_threshold: 0.2,
+      knowledge_answering_default: false,
+      rebuild_required: false,
+    });
+    mockedUpdateKnowledgeBaseSettings.mockResolvedValue({
+      workspace_id: "ws-kb",
+      chunk_size: 1000,
+      chunk_overlap: 200,
+      retrieval_top_k: 8,
+      similarity_threshold: 0.2,
+      knowledge_answering_default: false,
+      rebuild_required: true,
+    });
+
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "Open workspace settings" }));
+    await user.click(screen.getByRole("tab", { name: "Knowledge Base" }));
+
+    expect(mockedGetKnowledgeBaseSettings).toHaveBeenCalledWith("ws-kb");
+    expect(await screen.findByLabelText("Chunk Size")).toHaveValue(800);
+    expect(screen.getByLabelText("Chunk Overlap")).toHaveValue(200);
+
+    await user.clear(screen.getByLabelText("Chunk Size"));
+    await user.type(screen.getByLabelText("Chunk Size"), "1000");
+
+    expect(mockedUpdateKnowledgeBaseSettings).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Save settings" }));
+
+    expect(mockedUpdateWorkspace).not.toHaveBeenCalled();
+    expect(mockedUpdateKnowledgeBaseSettings).toHaveBeenCalledWith("ws-kb", {
+      chunk_size: 1000,
+      chunk_overlap: 200,
+      retrieval_top_k: 8,
+      similarity_threshold: 0.2,
+      knowledge_answering_default: false,
+    });
+    expect(await screen.findByText("Rebuild Required")).toBeInTheDocument();
+    expect(screen.getByText("Chunking settings changed. Rebuild the Knowledge Base when you're ready.")).toBeInTheDocument();
+  });
+
+  it("opens knowledge base management with an empty-state shell from workspace settings", async () => {
+    const user = userEvent.setup();
+
+    mockedListWorkspaces.mockResolvedValue([
+      {
+        workspace_id: "ws-kb",
+        name: "Workspace KB",
+        system_message: "System message",
+        selected_model: {
+          model_id: "gpt-5.4-nano",
+          label: "gpt-5.4-nano",
+          is_enabled: true,
+          is_default_workspace_model: true,
+        },
+        model_settings: {
+          temperature: 0.7,
+        },
+        created_at: "2026-05-15T00:00:00Z",
+        updated_at: "2026-05-15T00:00:00Z",
+      },
+    ]);
+    mockedListWorkspaceConversations.mockResolvedValue([]);
+    mockedGetKnowledgeBaseSettings.mockResolvedValue({
+      workspace_id: "ws-kb",
+      chunk_size: 800,
+      chunk_overlap: 200,
+      retrieval_top_k: 8,
+      similarity_threshold: 0.2,
+      knowledge_answering_default: false,
+      rebuild_required: false,
+    });
+
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "Open workspace settings" }));
+    await user.click(screen.getByRole("tab", { name: "Knowledge Base" }));
+    await user.click(await screen.findByRole("button", { name: "Open Knowledge Base Management" }));
+
+    expect(await screen.findByRole("heading", { name: "Knowledge Base Management" })).toBeInTheDocument();
+    expect(screen.getByText("No knowledge documents yet")).toBeInTheDocument();
+    expect(screen.getByText("Import and rebuild flows will connect here in the next slices.")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Back to Workspace Settings" }));
+
+    expect(await screen.findByRole("heading", { name: "Workspace Settings" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Knowledge Base" })).toHaveAttribute("aria-selected", "true");
   });
 
   it("keeps a disabled model workspace readable but blocks new generation", async () => {
