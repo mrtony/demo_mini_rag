@@ -1017,8 +1017,12 @@ describe("App", () => {
       onEvent({ event: "message.created", data: { message_id: 1 } });
       onEvent({ event: "message.delta", data: { delta: "Answer grounded in docs." } });
       onEvent({
-        event: "sources",
+        event: "message.done",
         data: {
+          status: "completed",
+          knowledge_answering_requested: true,
+          knowledge_answering_used: true,
+          fallback_reason: null,
           sources: [
             {
               knowledge_document_id: "doc-1",
@@ -1027,17 +1031,9 @@ describe("App", () => {
               chunk_count: 4,
               excerpt: "Milestones: kickoff, beta, launch.",
               score: 0.94,
+              page_number: 7,
             },
           ],
-        },
-      });
-      onEvent({
-        event: "message.done",
-        data: {
-          status: "completed",
-          knowledge_answering_requested: true,
-          knowledge_answering_used: true,
-          fallback_reason: null,
         },
       });
     });
@@ -1053,6 +1049,7 @@ describe("App", () => {
 
     expect((await screen.findAllByText("Sources")).length).toBeGreaterThan(0);
     expect(screen.getByText("alpha-plan.md")).toBeInTheDocument();
+    expect(screen.getByText(/Page 7/)).toBeInTheDocument();
     expect(screen.getByText("Milestones: kickoff, beta, launch.")).toBeInTheDocument();
   });
 

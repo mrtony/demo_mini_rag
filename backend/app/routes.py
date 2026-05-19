@@ -22,8 +22,11 @@ from .models import (
     KnowledgeBaseJob,
     KnowledgeBaseJobItem,
     KnowledgeDocument,
+    KnowledgeDocumentRevision,
     Message,
     ModelCatalog,
+    RetrievalTrace,
+    RetrievalTraceSource,
     Workspace,
     WorkspaceKnowledgeBaseSetting,
     WorkspaceModelSetting,
@@ -462,6 +465,85 @@ async def _create_message(
         return message
 
 
+def _coerce_optional_int(value: Any) -> int | None:
+    return value if isinstance(value, int) else None
+
+
+def _coerce_optional_str(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+async def _create_retrieval_trace(
+    *,
+    message_id: int,
+    workspace: Workspace,
+    knowledge_base_version_fk: int | None,
+    fallback_reason: str | None,
+    retrieval_query: str | None,
+    retrieval_top_k: int | None,
+    similarity_threshold: float | None,
+    sources: list[dict[str, Any]],
+) -> None:
+    if knowledge_base_version_fk is None or retrieval_query is None or not sources:
+        return
+
+    async with SessionLocal() as session:
+        trace = RetrievalTrace(
+            message_fk=message_id,
+            workspace_fk=workspace.id,
+            knowledge_base_version_fk=knowledge_base_version_fk,
+            fallback_reason=fallback_reason,
+            retrieval_query_text=retrieval_query,
+            retrieval_top_k=retrieval_top_k or 0,
+            similarity_threshold=similarity_threshold or 0.0,
+        )
+        session.add(trace)
+        await session.flush()
+
+        for source in sources:
+            document = (
+                await session.execute(
+                    select(KnowledgeDocument).where(
+                        KnowledgeDocument.workspace_fk == workspace.id,
+                        KnowledgeDocument.knowledge_document_id == str(
+                            source.get("knowledge_document_id", "")
+                        ),
+                    )
+                )
+            ).scalar_one_or_none()
+
+            revision = None
+            revision_number = _coerce_optional_int(source.get("revision_number"))
+            if document is not None and revision_number is not None:
+                revision = (
+                    await session.execute(
+                        select(KnowledgeDocumentRevision).where(
+                            KnowledgeDocumentRevision.knowledge_document_fk == document.id,
+                            KnowledgeDocumentRevision.revision_number == revision_number,
+                        )
+                    )
+                ).scalar_one_or_none()
+
+            session.add(
+                RetrievalTraceSource(
+                    retrieval_trace_fk=trace.id,
+                    knowledge_document_fk=document.id if document is not None else None,
+                    knowledge_document_revision_fk=revision.id if revision is not None else None,
+                    node_id=_coerce_optional_str(source.get("node_id")),
+                    score=float(source.get("score") or 0.0),
+                    page_number=_coerce_optional_int(source.get("page_number")),
+                    slide_number=_coerce_optional_int(source.get("slide_number")),
+                    citation_snapshot_text=str(source.get("excerpt") or ""),
+                    display_filename=str(source.get("display_filename") or ""),
+                )
+            )
+
+        await session.commit()
+
+
 async def _update_message_response(message_id: int, response_text: str, status_value: str | None = None) -> None:
     async with SessionLocal() as session:
         message = await session.get(Message, message_id)
@@ -498,6 +580,7 @@ def _build_done_event_payload(
     knowledge_answering_requested: bool,
     knowledge_answering_used: bool,
     fallback_reason: str | None,
+    sources: list[dict[str, Any]] | None,
     emit_metadata: bool,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
@@ -508,6 +591,8 @@ def _build_done_event_payload(
         payload["knowledge_answering_requested"] = knowledge_answering_requested
         payload["knowledge_answering_used"] = knowledge_answering_used
         payload["fallback_reason"] = fallback_reason
+        if sources:
+            payload["sources"] = sources
     return payload
 
 
@@ -984,6 +1069,16 @@ async def stream_chat(
                         sources=turn_plan.sources,
                     )
                     message_id = message.id
+                    await _create_retrieval_trace(
+                        message_id=message.id,
+                        workspace=workspace,
+                        knowledge_base_version_fk=turn_plan.knowledge_base_version_fk,
+                        fallback_reason=turn_plan.fallback_reason,
+                        retrieval_query=turn_plan.retrieval_query,
+                        retrieval_top_k=turn_plan.retrieval_top_k,
+                        similarity_threshold=turn_plan.similarity_threshold,
+                        sources=turn_plan.sources,
+                    )
                     logger.info(
                         "Chat stream started for conversation %s with message %s",
                         public_conversation_id,
@@ -1005,6 +1100,16 @@ async def stream_chat(
                             sources=turn_plan.sources,
                         )
                         message_id = message.id
+                        await _create_retrieval_trace(
+                            message_id=message.id,
+                            workspace=workspace,
+                            knowledge_base_version_fk=turn_plan.knowledge_base_version_fk,
+                            fallback_reason=turn_plan.fallback_reason,
+                            retrieval_query=turn_plan.retrieval_query,
+                            retrieval_top_k=turn_plan.retrieval_top_k,
+                            similarity_threshold=turn_plan.similarity_threshold,
+                            sources=turn_plan.sources,
+                        )
                         yield format_sse_event("message.created", {"message_id": message.id})
                     delta = event.delta
                     response_buffer += delta
@@ -1044,6 +1149,7 @@ async def stream_chat(
                             knowledge_answering_requested=turn_plan.knowledge_answering_requested,
                             knowledge_answering_used=turn_plan.knowledge_answering_used,
                             fallback_reason=turn_plan.fallback_reason,
+                            sources=turn_plan.sources,
                             emit_metadata=turn_plan.emit_metadata,
                         ),
                     )
@@ -1088,6 +1194,7 @@ async def stream_chat(
                     knowledge_answering_requested=turn_plan.knowledge_answering_requested,
                     knowledge_answering_used=turn_plan.knowledge_answering_used,
                     fallback_reason=turn_plan.fallback_reason,
+                    sources=turn_plan.sources,
                     emit_metadata=turn_plan.emit_metadata,
                 ),
             )

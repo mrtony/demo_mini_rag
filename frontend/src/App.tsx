@@ -49,6 +49,7 @@ import type {
   ModelSettingSchema,
   ModelCatalogSummary,
   ParsedSseEvent,
+  SourceCitation,
   WorkspaceSummary,
 } from "./types";
 
@@ -287,6 +288,34 @@ function formatKnowledgeBaseJobSummary(job: KnowledgeBaseJob): string {
     return `Knowledge Base rebuild - ${job.status}`;
   }
   return `${job.file_count} file${job.file_count !== 1 ? "s" : ""} - ${job.status}`;
+}
+
+function normalizeSourceCitations(rawSources: unknown[]): SourceCitation[] {
+  return rawSources.map((source) => {
+    const citation = source as Record<string, unknown>;
+    return {
+      knowledge_document_id: String(citation.knowledge_document_id ?? ""),
+      display_filename: String(citation.display_filename ?? ""),
+      revision_number: Number(citation.revision_number ?? 0),
+      chunk_count: Number(citation.chunk_count ?? 0),
+      excerpt: String(citation.excerpt ?? ""),
+      score: Number(citation.score ?? 0),
+      page_number:
+        typeof citation.page_number === "number" ? citation.page_number : null,
+      slide_number:
+        typeof citation.slide_number === "number" ? citation.slide_number : null,
+    };
+  });
+}
+
+function formatSourceLocator(source: SourceCitation): string | null {
+  if (typeof source.page_number === "number") {
+    return `Page ${source.page_number}`;
+  }
+  if (typeof source.slide_number === "number") {
+    return `Slide ${source.slide_number}`;
+  }
+  return null;
 }
 
 
@@ -772,14 +801,7 @@ export default function App() {
       const rawSources = Array.isArray(event.data.sources) ? event.data.sources : [];
       updateStreamBubble(targetBubbleId, (item) => ({
         ...item,
-        sources: rawSources.map((source) => ({
-          knowledge_document_id: String(source.knowledge_document_id ?? ""),
-          display_filename: String(source.display_filename ?? ""),
-          revision_number: Number(source.revision_number ?? 0),
-          chunk_count: Number(source.chunk_count ?? 0),
-          excerpt: String(source.excerpt ?? ""),
-          score: Number(source.score ?? 0),
-        })),
+        sources: normalizeSourceCitations(rawSources),
       }));
       return;
     }
@@ -796,6 +818,10 @@ export default function App() {
           typeof event.data.fallback_reason === "string" || event.data.fallback_reason === null
             ? (event.data.fallback_reason as string | null)
             : item.fallbackReason ?? null,
+        sources:
+          Array.isArray(event.data.sources) && event.data.sources.length > 0
+            ? normalizeSourceCitations(event.data.sources)
+            : item.sources,
         status:
           stopRequestedBubbleRef.current === item.id && nextStatus !== "error"
             ? "stopped"
@@ -2241,7 +2267,7 @@ export default function App() {
                                     <div key={`${source.knowledge_document_id}-${source.revision_number}`} className="mb-3 last:mb-0">
                                       <div className="font-medium text-stone-900">{source.display_filename}</div>
                                       <div className="text-xs text-stone-500">
-                                        Revision {source.revision_number} · {source.chunk_count} chunks
+                                        {formatSourceLocator(source) ?? "Document excerpt"}
                                       </div>
                                       <div className="mt-1 text-sm text-stone-700">{source.excerpt}</div>
                                     </div>

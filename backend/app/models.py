@@ -351,6 +351,76 @@ class KnowledgeDocumentRevision(Base):
     )
 
 
+class RetrievalTrace(Base):
+    __tablename__ = "retrieval_traces"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    message_fk: Mapped[int] = mapped_column(
+        ForeignKey("messages.id", ondelete="CASCADE"),
+        unique=True,
+        index=True,
+    )
+    workspace_fk: Mapped[int] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        index=True,
+    )
+    knowledge_base_version_fk: Mapped[int | None] = mapped_column(
+        ForeignKey("knowledge_base_versions.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    fallback_reason: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    retrieval_query_text: Mapped[str] = mapped_column(Text)
+    retrieval_top_k: Mapped[int] = mapped_column(Integer, default=0)
+    similarity_threshold: Mapped[float] = mapped_column(Float, default=0.0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+    message: Mapped["Message"] = relationship(back_populates="retrieval_trace", lazy="selectin")
+    sources: Mapped[list["RetrievalTraceSource"]] = relationship(
+        back_populates="retrieval_trace",
+        cascade="all, delete-orphan",
+        order_by="RetrievalTraceSource.id",
+        lazy="selectin",
+    )
+
+
+class RetrievalTraceSource(Base):
+    __tablename__ = "retrieval_trace_sources"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    retrieval_trace_fk: Mapped[int] = mapped_column(
+        ForeignKey("retrieval_traces.id", ondelete="CASCADE"),
+        index=True,
+    )
+    knowledge_document_fk: Mapped[int | None] = mapped_column(
+        ForeignKey("knowledge_documents.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    knowledge_document_revision_fk: Mapped[int | None] = mapped_column(
+        ForeignKey("knowledge_document_revisions.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    node_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    score: Mapped[float] = mapped_column(Float, default=0.0)
+    page_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    slide_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    citation_snapshot_text: Mapped[str] = mapped_column(Text)
+    display_filename: Mapped[str] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+    retrieval_trace: Mapped[RetrievalTrace] = relationship(back_populates="sources", lazy="selectin")
+    knowledge_document: Mapped["KnowledgeDocument | None"] = relationship(lazy="selectin")
+    knowledge_document_revision: Mapped["KnowledgeDocumentRevision | None"] = relationship(lazy="selectin")
+
+
 class Conversation(Base):
     __tablename__ = "conversations"
 
@@ -408,3 +478,9 @@ class Message(Base):
     )
 
     conversation: Mapped[Conversation] = relationship(back_populates="messages", lazy="selectin")
+    retrieval_trace: Mapped["RetrievalTrace | None"] = relationship(
+        back_populates="message",
+        cascade="all, delete-orphan",
+        uselist=False,
+        lazy="selectin",
+    )

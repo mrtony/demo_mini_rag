@@ -37,6 +37,9 @@ class TurnPlan:
     fallback_reason: str | None
     retrieval_query: str | None
     sources: list[dict[str, Any]]
+    knowledge_base_version_fk: int | None
+    retrieval_top_k: int | None
+    similarity_threshold: float | None
     emit_metadata: bool
 
 
@@ -75,8 +78,9 @@ def _build_retrieval_query(messages: list[Message], user_message: str) -> str:
 
 
 def _serialize_sources(results: list[SearchResult]) -> list[dict[str, Any]]:
-    return [
-        {
+    serialized_sources: list[dict[str, Any]] = []
+    for result in results:
+        source = {
             "knowledge_document_id": result.knowledge_document_id,
             "display_filename": result.display_filename,
             "revision_number": result.revision_number,
@@ -84,8 +88,12 @@ def _serialize_sources(results: list[SearchResult]) -> list[dict[str, Any]]:
             "excerpt": result.excerpt,
             "score": result.score,
         }
-        for result in results
-    ]
+        if result.page_number is not None:
+            source["page_number"] = result.page_number
+        if result.slide_number is not None:
+            source["slide_number"] = result.slide_number
+        serialized_sources.append(source)
+    return serialized_sources
 
 
 async def plan_chat_turn(
@@ -110,6 +118,9 @@ async def plan_chat_turn(
             fallback_reason=None,
             retrieval_query=None,
             sources=[],
+            knowledge_base_version_fk=None,
+            retrieval_top_k=None,
+            similarity_threshold=None,
             emit_metadata=emit_metadata,
         )
 
@@ -121,10 +132,15 @@ async def plan_chat_turn(
             fallback_reason=KNOWLEDGE_BASE_UNAVAILABLE,
             retrieval_query=None,
             sources=[],
+            knowledge_base_version_fk=None,
+            retrieval_top_k=None,
+            similarity_threshold=None,
             emit_metadata=True,
         )
 
     retrieval_query = _build_retrieval_query(messages, user_message)
+    retrieval_top_k = knowledge_settings.retrieval_top_k
+    similarity_threshold = knowledge_settings.similarity_threshold
     async with db_module.SessionLocal() as session:
         results = await search_workspace_documents(
             workspace_id=workspace.workspace_id,
@@ -140,6 +156,9 @@ async def plan_chat_turn(
             fallback_reason=RETRIEVAL_INSUFFICIENT,
             retrieval_query=retrieval_query,
             sources=[],
+            knowledge_base_version_fk=workspace.active_knowledge_base_version.id,
+            retrieval_top_k=retrieval_top_k,
+            similarity_threshold=similarity_threshold,
             emit_metadata=True,
         )
 
@@ -157,5 +176,8 @@ async def plan_chat_turn(
         fallback_reason=None,
         retrieval_query=retrieval_query,
         sources=sources,
+        knowledge_base_version_fk=workspace.active_knowledge_base_version.id,
+        retrieval_top_k=retrieval_top_k,
+        similarity_threshold=similarity_threshold,
         emit_metadata=True,
     )

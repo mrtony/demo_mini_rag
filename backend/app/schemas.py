@@ -19,6 +19,8 @@ class SourceCitation(BaseModel):
     chunk_count: int
     excerpt: str
     score: float
+    page_number: int | None = None
+    slide_number: int | None = None
 
 
 class ModelCatalogSummary(BaseModel):

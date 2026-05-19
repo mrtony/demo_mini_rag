@@ -110,6 +110,10 @@ def _requires_schema_reset(sync_connection) -> bool:
         return True
     if "knowledge_document_revisions" not in table_names:
         return True
+    if "retrieval_traces" not in table_names:
+        return True
+    if "retrieval_trace_sources" not in table_names:
+        return True
     conversation_columns = {column["name"] for column in inspector.get_columns("conversations")}
     model_catalog_columns = {column["name"] for column in inspector.get_columns("model_catalog")}
     message_columns = {column["name"] for column in inspector.get_columns("messages")}

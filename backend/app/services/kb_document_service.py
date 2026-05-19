@@ -29,6 +29,9 @@ class SearchResult:
     chunk_count: int
     excerpt: str
     score: float
+    page_number: int | None = None
+    slide_number: int | None = None
+    node_id: str | None = None
 
 
 @dataclass
@@ -155,6 +158,14 @@ class LlamaIndexQdrantKnowledgeBaseBackend:
             node.metadata["revision_number"] = revision_number
             node.metadata["chunk_count"] = chunk_count
             node.metadata["chunk_index"] = chunk_index
+            locator = locator_for_chunk(page_or_slide_map, chunk_index, chunk_count)
+            if locator is not None:
+                page_number = locator.get("page")
+                slide_number = locator.get("slide")
+                if isinstance(page_number, int):
+                    node.metadata["page_number"] = page_number
+                if isinstance(slide_number, int):
+                    node.metadata["slide_number"] = slide_number
             if locator_summary:
                 node.metadata["locator_summary"] = locator_summary
 
@@ -213,6 +224,9 @@ class LlamaIndexQdrantKnowledgeBaseBackend:
                 chunk_count=int(metadata.get("chunk_count", 0)),
                 excerpt=excerpt,
                 score=score,
+                page_number=_int_or_none(metadata.get("page_number")),
+                slide_number=_int_or_none(metadata.get("slide_number")),
+                node_id=str(getattr(item.node, "node_id", None) or getattr(item.node, "id_", "") or ""),
             )
             existing = best_results_by_document.get(knowledge_document_id)
             if existing is None or candidate.score > existing.score:
@@ -268,6 +282,24 @@ def summarize_locators(page_or_slide_map: list[dict[str, int]]) -> list[str]:
         elif isinstance(slide_number, int):
             locator_summary.append(f"Slide {slide_number}")
     return locator_summary
+
+
+def locator_for_chunk(
+    page_or_slide_map: list[dict[str, int]],
+    chunk_index: int,
+    chunk_count: int,
+) -> dict[str, int] | None:
+    if not page_or_slide_map:
+        return None
+    if len(page_or_slide_map) == 1:
+        return page_or_slide_map[0]
+    if len(page_or_slide_map) == chunk_count:
+        return page_or_slide_map[chunk_index - 1]
+    return None
+
+
+def _int_or_none(value: object) -> int | None:
+    return value if isinstance(value, int) else None
 
 
 def build_revision_ref_doc_id(knowledge_document_id: str, revision_number: int) -> str:

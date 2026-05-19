@@ -116,6 +116,8 @@ export type SourceCitation = {
   chunk_count: number;
   excerpt: string;
   score: number;
+  page_number?: number | null;
+  slide_number?: number | null;
 };
 
 export type ConversationDetail = {

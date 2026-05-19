@@ -11,7 +11,11 @@ from backend.app.config import get_settings
 from backend.app.main import app
 from backend.app.models import (
     KnowledgeBaseVersion,
+    KnowledgeDocument,
+    KnowledgeDocumentRevision,
     ModelCatalog,
+    RetrievalTrace,
+    RetrievalTraceSource,
     Workspace,
     WorkspaceKnowledgeBaseSetting,
     WorkspaceModelSetting,
@@ -979,6 +983,16 @@ async def test_workspace_default_knowledge_answering_builds_query_from_prompt_an
         "knowledge_answering_requested": True,
         "knowledge_answering_used": True,
         "fallback_reason": None,
+        "sources": [
+            {
+                "knowledge_document_id": "doc-alpha",
+                "display_filename": "alpha-plan.md",
+                "revision_number": 3,
+                "chunk_count": 4,
+                "excerpt": "Milestones: kickoff, beta, launch.",
+                "score": 0.94,
+            }
+        ],
     }
 
 
@@ -1028,6 +1042,157 @@ async def test_knowledge_answering_falls_back_to_plain_chat_when_workspace_has_n
     assert stored_message["knowledge_answering_used"] is False
     assert stored_message["fallback_reason"] == "knowledge_base_unavailable"
     assert stored_message["sources"] == []
+
+
+@pytest.mark.asyncio
+async def test_knowledge_answering_persists_retrieval_trace_and_keeps_citations_readable_after_document_delete(
+    monkeypatch, test_client
+):
+    workspace = await create_workspace(test_client, "Workspace KB Trace")
+
+    update_response = await test_client.put(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base-settings",
+        json={
+            "chunk_size": 800,
+            "chunk_overlap": 200,
+            "retrieval_top_k": 8,
+            "similarity_threshold": 0.2,
+            "knowledge_answering_default": True,
+        },
+    )
+    assert update_response.status_code == 200
+
+    async with db_module.SessionLocal() as session:
+        current_workspace = (
+            await session.execute(select(Workspace).where(Workspace.workspace_id == workspace["workspace_id"]))
+        ).scalar_one()
+        version = KnowledgeBaseVersion(
+            workspace_fk=current_workspace.id,
+            version_id="version-trace",
+            version_number=1,
+            status="active",
+            collection_name="kb_trace_collection",
+        )
+        session.add(version)
+        await session.flush()
+
+        document = KnowledgeDocument(
+            workspace_fk=current_workspace.id,
+            knowledge_document_id="doc-trace",
+            display_filename="ops-runbook.pdf",
+        )
+        session.add(document)
+        await session.flush()
+
+        revision = KnowledgeDocumentRevision(
+            knowledge_document_fk=document.id,
+            revision_number=2,
+            content_hash="trace-hash",
+            mime_type="application/pdf",
+            native_file_path="D:/tmp/ops-runbook.pdf",
+            normalized_markdown_text="Reset the staging cache before retrying deployment.",
+            page_or_slide_map_json='[{"page": 7}]',
+            chunk_count=1,
+            status="completed",
+        )
+        session.add(revision)
+        await session.flush()
+
+        document.current_revision_fk = revision.id
+        current_workspace.active_knowledge_base_version_fk = version.id
+        await session.commit()
+
+    async def fake_search_workspace_documents(*, workspace_id: str, query: str, session):
+        return [
+            SearchResult(
+                knowledge_document_id="doc-trace",
+                display_filename="ops-runbook.pdf",
+                revision_number=2,
+                chunk_count=1,
+                excerpt="Reset the staging cache before retrying deployment.",
+                score=0.97,
+                page_number=7,
+            )
+        ]
+
+    monkeypatch.setattr(
+        "backend.app.services.turn_orchestration.search_workspace_documents",
+        fake_search_workspace_documents,
+    )
+
+    response = await test_client.post(
+        "/api/chat/stream",
+        json={
+            "workspace_id": workspace["workspace_id"],
+            "conversation_id": 0,
+            "message_id": 0,
+            "message": "What should we do before retrying a staging deployment?",
+        },
+    )
+
+    assert response.status_code == 200
+    events = parse_sse_payload(response.text)
+    done_event = next(payload for name, payload in events if name == "message.done")
+    assert done_event["sources"] == [
+        {
+            "knowledge_document_id": "doc-trace",
+            "display_filename": "ops-runbook.pdf",
+            "revision_number": 2,
+            "chunk_count": 1,
+            "excerpt": "Reset the staging cache before retrying deployment.",
+            "score": 0.97,
+            "page_number": 7,
+        }
+    ]
+
+    conversations_response = await test_client.get(f"/api/workspaces/{workspace['workspace_id']}/conversations")
+    conversation_id = conversations_response.json()[0]["conversation_id"]
+
+    detail_response = await test_client.get(f"/api/conversations/{conversation_id}")
+    assert detail_response.status_code == 200
+    stored_message = detail_response.json()["messages"][0]
+    assert stored_message["sources"][0]["display_filename"] == "ops-runbook.pdf"
+    assert stored_message["sources"][0]["page_number"] == 7
+    assert stored_message["sources"][0]["excerpt"] == "Reset the staging cache before retrying deployment."
+
+    delete_response = await test_client.delete(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/documents/doc-trace"
+    )
+    assert delete_response.status_code == 204
+
+    detail_after_delete = await test_client.get(f"/api/conversations/{conversation_id}")
+    assert detail_after_delete.status_code == 200
+    assert detail_after_delete.json()["messages"][0]["sources"][0]["display_filename"] == "ops-runbook.pdf"
+    assert detail_after_delete.json()["messages"][0]["sources"][0]["page_number"] == 7
+    assert (
+        detail_after_delete.json()["messages"][0]["sources"][0]["excerpt"]
+        == "Reset the staging cache before retrying deployment."
+    )
+
+    async with db_module.SessionLocal() as session:
+        trace = (
+            await session.execute(
+                select(RetrievalTrace)
+                .where(RetrievalTrace.retrieval_query_text.contains("staging deployment"))
+            )
+        ).scalar_one()
+        trace_sources = (
+            await session.execute(
+                select(RetrievalTraceSource).where(RetrievalTraceSource.retrieval_trace_fk == trace.id)
+            )
+        ).scalars().all()
+
+    assert trace.workspace_fk == current_workspace.id
+    assert trace.knowledge_base_version_fk == version.id
+    assert trace.retrieval_top_k == 8
+    assert trace.similarity_threshold == 0.2
+    assert len(trace_sources) == 1
+    assert trace_sources[0].knowledge_document_fk == document.id
+    assert trace_sources[0].knowledge_document_revision_fk == revision.id
+    assert trace_sources[0].display_filename == "ops-runbook.pdf"
+    assert trace_sources[0].page_number == 7
+    assert trace_sources[0].slide_number is None
+    assert trace_sources[0].citation_snapshot_text == "Reset the staging cache before retrying deployment."
 
 
 @pytest.mark.asyncio
