@@ -935,6 +935,40 @@ async def test_get_jobs_lists_newly_created_import_job_as_active(test_client):
 
 
 @pytest.mark.asyncio
+async def test_post_import_eventually_completes_without_manual_advance(test_client):
+    workspace = await create_workspace(test_client, "Workspace Auto Worker")
+
+    response = await test_client.post(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/import",
+        files=[("files", ("guide.txt", b"Background worker import path", "text/plain"))],
+    )
+    assert response.status_code == 202
+
+    documents_payload = {"documents": []}
+    jobs_payload = {"active": [], "history": []}
+    for _ in range(40):
+        await asyncio.sleep(0.25)
+        jobs_response = await test_client.get(
+            f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/jobs"
+        )
+        documents_response = await test_client.get(
+            f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/documents"
+        )
+        assert jobs_response.status_code == 200
+        assert documents_response.status_code == 200
+        jobs_payload = jobs_response.json()
+        documents_payload = documents_response.json()
+        if documents_payload["documents"] and any(
+            job["status"] == "completed" for job in jobs_payload["history"]
+        ):
+            break
+
+    assert documents_payload["documents"]
+    assert documents_payload["documents"][0]["display_filename"] == "guide.txt"
+    assert any(job["status"] == "completed" for job in jobs_payload["history"])
+
+
+@pytest.mark.asyncio
 async def test_second_import_is_queued_when_first_job_is_running(test_client):
     from backend.app.services.kb_job_service import advance_import_queue
     from backend.app.db import SessionLocal
@@ -1056,6 +1090,342 @@ async def test_advance_import_queue_completes_queued_job(test_client):
     history_ids = [j["job_id"] for j in payload["history"]]
     assert job_id in history_ids
     assert not any(j["job_id"] == job_id for j in payload["active"])
+
+
+@pytest.mark.asyncio
+async def test_completed_import_creates_retrievable_knowledge_document(test_client):
+    from backend.app.services.kb_job_service import advance_import_queue
+    from backend.app.db import SessionLocal
+
+    workspace = await create_workspace(test_client, "Workspace Documents")
+
+    files = [
+        (
+            "files",
+            (
+                "guide.txt",
+                b"Alpha project onboarding notes.\nThe retrieval tracer bullet should find this sentence.",
+                "text/plain",
+            ),
+        )
+    ]
+    import_resp = await test_client.post(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/import",
+        files=files,
+    )
+    assert import_resp.status_code == 202
+
+    async with SessionLocal() as session:
+        completed_job = await advance_import_queue(workspace["workspace_id"], session)
+        await session.commit()
+
+    assert completed_job is not None
+    assert completed_job.status == "completed"
+
+    documents_resp = await test_client.get(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/documents"
+    )
+    assert documents_resp.status_code == 200
+    documents_payload = documents_resp.json()
+    assert len(documents_payload["documents"]) == 1
+    document = documents_payload["documents"][0]
+    assert document["display_filename"] == "guide.txt"
+    assert document["chunk_count"] >= 1
+    assert document["revision_number"] == 1
+
+    search_resp = await test_client.post(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/search",
+        json={"query": "retrieval tracer bullet"},
+    )
+    assert search_resp.status_code == 200
+    search_payload = search_resp.json()
+    assert len(search_payload["results"]) == 1
+    assert search_payload["results"][0]["display_filename"] == "guide.txt"
+
+
+@pytest.mark.asyncio
+async def test_completed_pdf_import_creates_retrievable_knowledge_document(test_client):
+    workspace = await create_workspace(test_client, "Workspace PDF")
+
+    pdf_bytes = b"""%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 144] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>
+endobj
+4 0 obj
+<< /Length 44 >>
+stream
+BT
+/F1 24 Tf
+72 72 Td
+(Hello PDF) Tj
+ET
+endstream
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000241 00000 n 
+0000000335 00000 n 
+trailer
+<< /Root 1 0 R /Size 6 >>
+startxref
+405
+%%EOF"""
+
+    import_resp = await test_client.post(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/import",
+        files=[("files", ("guide.pdf", pdf_bytes, "application/pdf"))],
+    )
+    assert import_resp.status_code == 202
+
+    documents_payload = {"documents": []}
+    for _ in range(40):
+        await asyncio.sleep(0.25)
+        documents_resp = await test_client.get(
+            f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/documents"
+        )
+        assert documents_resp.status_code == 200
+        documents_payload = documents_resp.json()
+        if documents_payload["documents"]:
+            break
+
+    assert len(documents_payload["documents"]) == 1
+    document = documents_payload["documents"][0]
+    assert document["display_filename"] == "guide.pdf"
+    assert document["chunk_count"] >= 1
+    assert document["revision_number"] == 1
+
+    search_resp = await test_client.post(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/search",
+        json={"query": "Hello PDF"},
+    )
+    assert search_resp.status_code == 200
+    search_payload = search_resp.json()
+    assert len(search_payload["results"]) == 1
+    assert search_payload["results"][0]["display_filename"] == "guide.pdf"
+
+
+@pytest.mark.asyncio
+async def test_import_dedupes_same_content_and_replaces_revision_for_same_filename(test_client):
+    from backend.app.services.kb_job_service import advance_import_queue
+    from backend.app.db import SessionLocal
+
+    workspace = await create_workspace(test_client, "Workspace Governance")
+
+    first_import = await test_client.post(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/import",
+        files=[("files", ("guide.txt", b"Alpha release notes", "text/plain"))],
+    )
+    assert first_import.status_code == 202
+
+    async with SessionLocal() as session:
+        first_job = await advance_import_queue(workspace["workspace_id"], session)
+        await session.commit()
+
+    assert first_job is not None
+    assert first_job.items[0].outcome == "imported"
+
+    duplicate_import = await test_client.post(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/import",
+        files=[("files", ("copy.txt", b"Alpha release notes", "text/plain"))],
+    )
+    assert duplicate_import.status_code == 202
+
+    async with SessionLocal() as session:
+        duplicate_job = await advance_import_queue(workspace["workspace_id"], session)
+        await session.commit()
+
+    assert duplicate_job is not None
+    assert duplicate_job.items[0].outcome == "unchanged"
+
+    replacement_import = await test_client.post(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/import",
+        files=[("files", ("guide.txt", b"Beta release notes", "text/plain"))],
+    )
+    assert replacement_import.status_code == 202
+
+    async with SessionLocal() as session:
+        replacement_job = await advance_import_queue(workspace["workspace_id"], session)
+        await session.commit()
+
+    assert replacement_job is not None
+    assert replacement_job.items[0].outcome == "replaced"
+
+    documents_resp = await test_client.get(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/documents"
+    )
+    assert documents_resp.status_code == 200
+    documents = documents_resp.json()["documents"]
+    assert len(documents) == 1
+    assert documents[0]["display_filename"] == "guide.txt"
+    assert documents[0]["revision_number"] == 2
+
+    search_resp = await test_client.post(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/search",
+        json={"query": "Beta release"},
+    )
+    assert search_resp.status_code == 200
+    assert [result["display_filename"] for result in search_resp.json()["results"]] == ["guide.txt"]
+
+
+@pytest.mark.asyncio
+async def test_deleting_document_removes_it_from_management_and_search(test_client):
+    from backend.app.services.kb_job_service import advance_import_queue
+    from backend.app.db import SessionLocal
+
+    workspace = await create_workspace(test_client, "Workspace Delete KB")
+
+    import_resp = await test_client.post(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/import",
+        files=[("files", ("ops.txt", b"Gamma support handbook", "text/plain"))],
+    )
+    assert import_resp.status_code == 202
+
+    async with SessionLocal() as session:
+        await advance_import_queue(workspace["workspace_id"], session)
+        await session.commit()
+
+    documents_resp = await test_client.get(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/documents"
+    )
+    document_id = documents_resp.json()["documents"][0]["knowledge_document_id"]
+
+    delete_resp = await test_client.delete(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/documents/{document_id}"
+    )
+    assert delete_resp.status_code == 204
+
+    documents_after_delete = await test_client.get(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/documents"
+    )
+    assert documents_after_delete.status_code == 200
+    assert documents_after_delete.json()["documents"] == []
+
+    search_resp = await test_client.post(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/search",
+        json={"query": "Gamma support"},
+    )
+    assert search_resp.status_code == 200
+    assert search_resp.json()["results"] == []
+
+
+@pytest.mark.asyncio
+async def test_failed_replacement_keeps_existing_retrievable_revision_and_unsupported_item_outcome(test_client):
+    from backend.app.services.kb_job_service import advance_import_queue
+    from backend.app.db import SessionLocal
+
+    workspace = await create_workspace(test_client, "Workspace Failed Revision")
+
+    initial_import = await test_client.post(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/import",
+        files=[("files", ("guide.txt", b"Stable operational runbook", "text/plain"))],
+    )
+    assert initial_import.status_code == 202
+
+    async with SessionLocal() as session:
+        await advance_import_queue(workspace["workspace_id"], session)
+        await session.commit()
+
+    replacement_import = await test_client.post(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/import",
+        files=[
+            ("files", ("guide.txt", b"\xff\xfe\xfd", "text/plain")),
+            ("files", ("slides.pptx", b"fake pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation")),
+        ],
+    )
+    assert replacement_import.status_code == 202
+
+    async with SessionLocal() as session:
+        replacement_job = await advance_import_queue(workspace["workspace_id"], session)
+        await session.commit()
+
+    assert replacement_job is not None
+    outcomes = {item.filename: item.outcome for item in replacement_job.items}
+    assert outcomes["guide.txt"] == "failed"
+    assert outcomes["slides.pptx"] == "unsupported"
+
+    documents_resp = await test_client.get(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/documents"
+    )
+    assert documents_resp.status_code == 200
+    documents = documents_resp.json()["documents"]
+    assert len(documents) == 1
+    assert documents[0]["display_filename"] == "guide.txt"
+    assert documents[0]["revision_number"] == 1
+
+    search_resp = await test_client.post(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/search",
+        json={"query": "Stable operational"},
+    )
+    assert search_resp.status_code == 200
+    assert [result["display_filename"] for result in search_resp.json()["results"]] == ["guide.txt"]
+
+
+@pytest.mark.asyncio
+async def test_new_failed_or_unsupported_upload_does_not_create_formal_document(test_client):
+    from backend.app.services.kb_job_service import advance_import_queue
+    from backend.app.db import SessionLocal
+    from backend.app.models import KnowledgeDocument, KnowledgeDocumentRevision, Workspace
+    from sqlalchemy import select
+
+    workspace = await create_workspace(test_client, "Workspace Failed New File")
+
+    import_resp = await test_client.post(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/import",
+        files=[
+            ("files", ("broken.txt", b"\xff\xfe\xfd", "text/plain")),
+            ("files", ("slides.pptx", b"fake pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation")),
+        ],
+    )
+    assert import_resp.status_code == 202
+
+    async with SessionLocal() as session:
+        job = await advance_import_queue(workspace["workspace_id"], session)
+        await session.commit()
+
+    assert job is not None
+    outcomes = {item.filename: item.outcome for item in job.items}
+    assert outcomes["broken.txt"] == "failed"
+    assert outcomes["slides.pptx"] == "unsupported"
+
+    documents_resp = await test_client.get(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/documents"
+    )
+    assert documents_resp.status_code == 200
+    assert documents_resp.json()["documents"] == []
+
+    async with SessionLocal() as session:
+        workspace_row = (
+            await session.execute(select(Workspace).where(Workspace.workspace_id == workspace["workspace_id"]))
+        ).scalar_one()
+        stored_documents = (
+            await session.execute(
+                select(KnowledgeDocument).where(KnowledgeDocument.workspace_fk == workspace_row.id)
+            )
+        ).scalars().all()
+        stored_revisions = (
+            await session.execute(
+                select(KnowledgeDocumentRevision).join(
+                    KnowledgeDocument,
+                    KnowledgeDocumentRevision.knowledge_document_fk == KnowledgeDocument.id,
+                ).where(KnowledgeDocument.workspace_fk == workspace_row.id)
+            )
+        ).scalars().all()
+
+    assert stored_documents == []
+    assert stored_revisions == []
 
 
 @pytest.mark.asyncio

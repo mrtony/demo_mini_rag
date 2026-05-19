@@ -104,12 +104,22 @@ def _requires_schema_reset(sync_connection) -> bool:
         return True
     if "knowledge_base_jobs" not in table_names:
         return True
+    if "knowledge_documents" not in table_names:
+        return True
+    if "knowledge_document_revisions" not in table_names:
+        return True
     conversation_columns = {column["name"] for column in inspector.get_columns("conversations")}
     model_catalog_columns = {column["name"] for column in inspector.get_columns("model_catalog")}
+    kb_job_item_columns = (
+        {column["name"] for column in inspector.get_columns("knowledge_base_job_items")}
+        if "knowledge_base_job_items" in table_names
+        else set()
+    )
     return (
         "workspace_fk" not in conversation_columns
         or "settings_schema_json" not in model_catalog_columns
         or "settings_defaults_json" not in model_catalog_columns
+        or "mime_type" not in kb_job_item_columns
     )
 
 

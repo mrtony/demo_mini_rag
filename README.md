@@ -258,6 +258,35 @@ Logging behavior:
 - Database `SELECT`, `INSERT`, `UPDATE`, and `DELETE` statements are logged by default
 - `logs/` is ignored by git and will not be committed
 
+## Knowledge Base Import
+
+The workspace Knowledge Base import path is:
+
+```text
+Native File -> MarkItDown normalized markdown -> LlamaIndex chunking -> FastEmbed embeddings -> Qdrant
+```
+
+Current supported import formats:
+
+- `.txt`
+- `.md`
+- `.markdown`
+- `.pdf`
+
+Current behavior:
+
+- One upload creates one asynchronous Knowledge Base job with one file-level item per file
+- Imports are processed automatically by an in-process background queue worker in the FastAPI app
+- The Knowledge Base Management screen polls jobs and documents while it stays open, so completed imports should appear without reopening the screen
+- Unsupported or failed files stay visible in job history and per-file outcomes, but do not become formal knowledge documents
+- Successful replacements create a new revision and keep the previous retrievable revision in place if the new revision fails
+
+If PDF imports fail in a fresh environment, make sure backend dependencies were refreshed after PDF support was added:
+
+```powershell
+uv sync --group dev
+```
+
 ## Tests
 
 Backend:

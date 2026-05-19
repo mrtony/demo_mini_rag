@@ -7,10 +7,16 @@ requires-python = ">=3.13"
 dependencies = [
     "aiosqlite>=0.21.0",
     "fastapi[standard]>=0.136.1",
+    "fastembed>=0.8.0",
     "langchain>=1.0,<2.0",
     "langchain-core>=1.0,<2.0",
     "langchain-openai>=1.0.1",
+    "llama-index-core>=0.14.22",
+    "llama-index-embeddings-fastembed>=0.6.0",
+    "llama-index-vector-stores-qdrant>=0.10.1",
+    "markitdown[pdf]>=0.1.5",
     "pydantic-settings>=2.10.1",
+    "qdrant-client>=1.18.0",
     "sqlalchemy>=2.0.41",
     "uvicorn[standard]>=0.38.0",
 ]

@@ -48,12 +48,21 @@ export type KnowledgeBaseSettings = {
   rebuild_required: boolean;
 };
 
+export type KnowledgeBaseJobItem = {
+  item_id: string;
+  filename: string;
+  status: string;
+  outcome: string | null;
+  error_message: string | null;
+};
+
 export type KnowledgeBaseJob = {
   job_id: string;
   workspace_id: string;
   status: "queued" | "running" | "completed" | "failed" | "canceled";
   file_count: number;
   created_at: string;
+  items?: KnowledgeBaseJobItem[];
   completed_at: string | null;
 };
 
@@ -62,6 +71,20 @@ export type KnowledgeBaseJobList = {
   history: KnowledgeBaseJob[];
   history_total: number;
   history_page: number;
+};
+
+export type KnowledgeDocument = {
+  knowledge_document_id: string;
+  display_filename: string;
+  revision_number: number;
+  chunk_count: number;
+  locator_summary: string[];
+  created_at: string;
+  updated_at: string;
+};
+
+export type KnowledgeDocumentList = {
+  documents: KnowledgeDocument[];
 };
 
 export type ConversationSummary = {

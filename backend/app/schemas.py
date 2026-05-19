@@ -103,6 +103,7 @@ class KnowledgeBaseJobItemSummary(BaseModel):
     item_id: str
     filename: str
     status: str
+    outcome: str | None = None
     error_message: str | None = None
 
 
@@ -112,6 +113,7 @@ class KnowledgeBaseJobSummary(BaseModel):
     status: str
     file_count: int
     created_at: datetime
+    items: list[KnowledgeBaseJobItemSummary] = Field(default_factory=list)
     completed_at: datetime | None = None
 
 
@@ -120,6 +122,37 @@ class KnowledgeBaseJobListResponse(BaseModel):
     history: list[KnowledgeBaseJobSummary]
     history_total: int
     history_page: int
+
+
+class KnowledgeDocumentSummary(BaseModel):
+    knowledge_document_id: str
+    display_filename: str
+    revision_number: int
+    chunk_count: int
+    locator_summary: list[str] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+
+
+class KnowledgeDocumentListResponse(BaseModel):
+    documents: list[KnowledgeDocumentSummary]
+
+
+class KnowledgeBaseSearchRequest(BaseModel):
+    query: str = Field(min_length=1)
+
+
+class KnowledgeBaseSearchResult(BaseModel):
+    knowledge_document_id: str
+    display_filename: str
+    revision_number: int
+    chunk_count: int
+    excerpt: str
+    score: float
+
+
+class KnowledgeBaseSearchResponse(BaseModel):
+    results: list[KnowledgeBaseSearchResult]
 
 
 class ConversationSummary(BaseModel):

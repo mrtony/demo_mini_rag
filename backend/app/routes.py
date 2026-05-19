@@ -9,7 +9,7 @@ from typing import Any
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -21,6 +21,7 @@ from .models import (
     Conversation,
     KnowledgeBaseJob,
     KnowledgeBaseJobItem,
+    KnowledgeDocument,
     Message,
     ModelCatalog,
     Workspace,
@@ -32,7 +33,13 @@ from .schemas import (
     ConversationDetail,
     ConversationSummary,
     KnowledgeBaseJobListResponse,
+    KnowledgeBaseJobItemSummary,
+    KnowledgeBaseSearchRequest,
+    KnowledgeBaseSearchResponse,
+    KnowledgeBaseSearchResult,
     KnowledgeBaseJobSummary,
+    KnowledgeDocumentListResponse,
+    KnowledgeDocumentSummary,
     KnowledgeBaseSettingsSummary,
     KnowledgeBaseSettingsUpdateRequest,
     ModelCatalogEntry,
@@ -44,7 +51,13 @@ from .schemas import (
     WorkspaceSummary,
 )
 from .services.chat_service import ChatService
-from .services.kb_job_service import advance_import_queue, has_running_job
+from .services.kb_document_service import (
+    compute_content_hash,
+    delete_document_revision_from_index,
+    persist_upload_bytes,
+    search_workspace_documents,
+)
+from .services.kb_job_service import advance_import_queue, has_running_job, schedule_import_queue_processing
 from .sse import format_sse_event, iter_sse
 
 
@@ -162,7 +175,47 @@ def _serialize_kb_job(job: KnowledgeBaseJob) -> KnowledgeBaseJobSummary:
         status=job.status,
         file_count=job.file_count,
         created_at=job.created_at,
+        items=[
+            KnowledgeBaseJobItemSummary(
+                item_id=item.item_id,
+                filename=item.filename,
+                status=item.status,
+                outcome=item.outcome,
+                error_message=item.error_message,
+            )
+            for item in job.items
+        ],
         completed_at=job.completed_at,
+    )
+
+
+def _serialize_knowledge_document(document: KnowledgeDocument) -> KnowledgeDocumentSummary:
+    locator_summary: list[str] = []
+    if document.current_revision is not None:
+        try:
+            locator_data = json.loads(document.current_revision.page_or_slide_map_json)
+        except json.JSONDecodeError:
+            locator_data = []
+        if isinstance(locator_data, list):
+            for locator in locator_data:
+                if not isinstance(locator, dict):
+                    continue
+                page_number = locator.get("page")
+                slide_number = locator.get("slide")
+                if isinstance(page_number, int):
+                    locator_summary.append(f"Page {page_number}")
+                elif isinstance(slide_number, int):
+                    locator_summary.append(f"Slide {slide_number}")
+
+    current_revision = document.current_revision
+    return KnowledgeDocumentSummary(
+        knowledge_document_id=document.knowledge_document_id,
+        display_filename=document.display_filename,
+        revision_number=current_revision.revision_number if current_revision is not None else 0,
+        chunk_count=current_revision.chunk_count if current_revision is not None else 0,
+        locator_summary=locator_summary,
+        created_at=document.created_at,
+        updated_at=document.updated_at,
     )
 
 
@@ -1006,16 +1059,28 @@ async def create_knowledge_base_import_job(
     await session.flush()
 
     for upload in files:
+        item_id = str(uuid4())
+        content = await upload.read()
         item = KnowledgeBaseJobItem(
-            item_id=str(uuid4()),
+            item_id=item_id,
             job_fk=job.id,
             filename=upload.filename or "unknown",
+            mime_type=upload.content_type or "application/octet-stream",
+            content_hash=compute_content_hash(content),
+            native_file_path=persist_upload_bytes(
+                workspace.workspace_id,
+                job.job_id,
+                item_id,
+                upload.filename or "unknown",
+                content,
+            ),
             status="pending",
         )
         session.add(item)
 
     await session.commit()
     await session.refresh(job)
+    schedule_import_queue_processing(workspace.workspace_id)
     return _serialize_kb_job(job)
 
 
@@ -1068,6 +1133,95 @@ async def list_knowledge_base_jobs(
         history_total=history_total,
         history_page=history_page,
     )
+
+
+@router.get(
+    "/workspaces/{workspace_id}/knowledge-base/documents",
+    response_model=KnowledgeDocumentListResponse,
+)
+async def list_knowledge_base_documents(
+    workspace_id: str,
+    session: AsyncSession = Depends(get_db_session),
+) -> KnowledgeDocumentListResponse:
+    workspace = await _load_workspace_or_404(session, workspace_id)
+
+    result = await session.execute(
+        select(KnowledgeDocument)
+        .where(
+            KnowledgeDocument.workspace_fk == workspace.id,
+            KnowledgeDocument.is_deleted.is_(False),
+            KnowledgeDocument.current_revision_fk.is_not(None),
+        )
+        .options(selectinload(KnowledgeDocument.current_revision))
+        .order_by(KnowledgeDocument.id.asc())
+    )
+    documents = result.scalars().all()
+    return KnowledgeDocumentListResponse(
+        documents=[_serialize_knowledge_document(document) for document in documents]
+    )
+
+
+@router.post(
+    "/workspaces/{workspace_id}/knowledge-base/search",
+    response_model=KnowledgeBaseSearchResponse,
+)
+async def search_knowledge_base_documents(
+    workspace_id: str,
+    payload: KnowledgeBaseSearchRequest,
+    session: AsyncSession = Depends(get_db_session),
+) -> KnowledgeBaseSearchResponse:
+    await _load_workspace_or_404(session, workspace_id)
+    results = await search_workspace_documents(workspace_id, payload.query, session)
+    return KnowledgeBaseSearchResponse(
+        results=[
+            KnowledgeBaseSearchResult(
+                knowledge_document_id=result.knowledge_document_id,
+                display_filename=result.display_filename,
+                revision_number=result.revision_number,
+                chunk_count=result.chunk_count,
+                excerpt=result.excerpt,
+                score=result.score,
+            )
+            for result in results
+        ]
+    )
+
+
+@router.delete(
+    "/workspaces/{workspace_id}/knowledge-base/documents/{knowledge_document_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_knowledge_base_document(
+    workspace_id: str,
+    knowledge_document_id: str,
+    session: AsyncSession = Depends(get_db_session),
+) -> Response:
+    workspace = await _load_workspace_or_404(session, workspace_id)
+
+    result = await session.execute(
+        select(KnowledgeDocument)
+        .where(
+            KnowledgeDocument.workspace_fk == workspace.id,
+            KnowledgeDocument.knowledge_document_id == knowledge_document_id,
+            KnowledgeDocument.is_deleted.is_(False),
+        )
+        .options(selectinload(KnowledgeDocument.current_revision))
+    )
+    document = result.scalar_one_or_none()
+    if document is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Knowledge document not found")
+
+    if document.current_revision is not None:
+        delete_document_revision_from_index(
+            workspace_id=workspace.workspace_id,
+            knowledge_document_id=document.knowledge_document_id,
+            revision_number=document.current_revision.revision_number,
+        )
+    document.is_deleted = True
+    document.deleted_at = _utc_now()
+    document.updated_at = _utc_now()
+    await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post(

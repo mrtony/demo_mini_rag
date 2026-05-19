@@ -5,6 +5,7 @@ import type {
   ConversationSummary,
   KnowledgeBaseJob,
   KnowledgeBaseJobList,
+  KnowledgeDocumentList,
   KnowledgeBaseSettings,
   ModelCatalogEntry,
   ModelCatalogSummary,
@@ -58,6 +59,21 @@ export async function cancelImportJob(workspaceId: string, jobId: string): Promi
     { method: "POST" },
   );
   return expectJson<KnowledgeBaseJob>(response);
+}
+
+export async function listKnowledgeBaseDocuments(workspaceId: string): Promise<KnowledgeDocumentList> {
+  const response = await fetch(`${API_BASE}/api/workspaces/${workspaceId}/knowledge-base/documents`);
+  return expectJson<KnowledgeDocumentList>(response);
+}
+
+export async function deleteKnowledgeBaseDocument(workspaceId: string, knowledgeDocumentId: string): Promise<void> {
+  const response = await fetch(
+    `${API_BASE}/api/workspaces/${workspaceId}/knowledge-base/documents/${knowledgeDocumentId}`,
+    { method: "DELETE" },
+  );
+  if (!response.ok) {
+    await expectJson<Record<string, never>>(response);
+  }
 }
 
 export async function listWorkspaces(): Promise<WorkspaceSummary[]> {

@@ -7,10 +7,12 @@ import {
   cancelImportJob,
   createImportJob,
   createWorkspace,
+  deleteKnowledgeBaseDocument,
   deleteConversation,
   getDefaultWorkspaceModel,
   getKnowledgeBaseSettings,
   getConversation,
+  listKnowledgeBaseDocuments,
   listArchivedWorkspaces,
   listKnowledgeBaseJobs,
   listModels,
@@ -39,6 +41,8 @@ import type {
   ConversationSummary,
   KnowledgeBaseJob,
   KnowledgeBaseJobList,
+  KnowledgeDocument,
+  KnowledgeDocumentList,
   KnowledgeBaseSettings,
   ModelCatalogEntry,
   ModelSettingSchema,
@@ -310,7 +314,9 @@ export default function App() {
     history_total: 0,
     history_page: 1,
   });
+  const [knowledgeDocuments, setKnowledgeDocuments] = useState<KnowledgeDocumentList>({ documents: [] });
   const [isKbJobsLoading, setIsKbJobsLoading] = useState(false);
+  const [isKnowledgeDocumentsLoading, setIsKnowledgeDocumentsLoading] = useState(false);
   const [selectedImportFiles, setSelectedImportFiles] = useState<File[]>([]);
   const [isImporting, setIsImporting] = useState(false);
   const [activeSettingsTab, setActiveSettingsTab] = useState<"general" | "model" | "knowledgeBase">("general");
@@ -343,6 +349,21 @@ export default function App() {
     }
     void refreshWorkspaceConversations(activeWorkspaceId);
   }, [activeWorkspaceId]);
+
+  useEffect(() => {
+    if (!isKnowledgeBaseManagementOpen || activeWorkspaceId === null) {
+      return;
+    }
+
+    const intervalId = window.setInterval(() => {
+      void loadKbJobs(activeWorkspaceId);
+      void loadKnowledgeDocuments(activeWorkspaceId);
+    }, 2000);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [isKnowledgeBaseManagementOpen, activeWorkspaceId]);
 
   useEffect(() => {
     activeWorkspaceIdRef.current = activeWorkspaceId;
@@ -995,6 +1016,7 @@ export default function App() {
     setKnowledgeBaseSettingsDraft(null);
     setActiveSettingsTab("knowledgeBase");
     void loadKbJobs(activeWorkspace.workspace_id);
+    void loadKnowledgeDocuments(activeWorkspace.workspace_id);
   }
 
   async function loadKbJobs(workspaceId: string, page = 1) {
@@ -1009,6 +1031,18 @@ export default function App() {
     }
   }
 
+  async function loadKnowledgeDocuments(workspaceId: string) {
+    setIsKnowledgeDocumentsLoading(true);
+    try {
+      const result = await listKnowledgeBaseDocuments(workspaceId);
+      setKnowledgeDocuments(result);
+    } catch {
+      // Ignore load errors; document list will stay empty.
+    } finally {
+      setIsKnowledgeDocumentsLoading(false);
+    }
+  }
+
   async function handleImportFiles() {
     if (!activeWorkspace || selectedImportFiles.length === 0) return;
     setIsImporting(true);
@@ -1016,6 +1050,7 @@ export default function App() {
       await createImportJob(activeWorkspace.workspace_id, selectedImportFiles);
       setSelectedImportFiles([]);
       await loadKbJobs(activeWorkspace.workspace_id);
+      await loadKnowledgeDocuments(activeWorkspace.workspace_id);
     } catch {
       // Ignore import errors for this slice.
     } finally {
@@ -1030,6 +1065,17 @@ export default function App() {
       await loadKbJobs(activeWorkspace.workspace_id);
     } catch {
       // Ignore cancel errors.
+    }
+  }
+
+  async function handleDeleteKnowledgeDocument(knowledgeDocumentId: string) {
+    if (!activeWorkspace) return;
+    try {
+      await deleteKnowledgeBaseDocument(activeWorkspace.workspace_id, knowledgeDocumentId);
+      await loadKnowledgeDocuments(activeWorkspace.workspace_id);
+      await loadKbJobs(activeWorkspace.workspace_id);
+    } catch {
+      // Ignore delete errors.
     }
   }
 
@@ -1526,6 +1572,49 @@ export default function App() {
                       </div>
                     </div>
 
+                    <section aria-label="Knowledge documents">
+                      <p className="mb-3 text-[11px] font-semibold uppercase tracking-[0.18em] text-stone-500">
+                        Knowledge documents
+                      </p>
+                      {isKnowledgeDocumentsLoading ? (
+                        <p className="text-sm text-stone-500">Loading…</p>
+                      ) : knowledgeDocuments.documents.length === 0 ? (
+                        <p className="text-sm text-stone-400">No imported knowledge documents yet.</p>
+                      ) : (
+                        <ul className="flex flex-col gap-3">
+                          {knowledgeDocuments.documents.map((document) => (
+                            <li
+                              key={document.knowledge_document_id}
+                              className="rounded-2xl border border-stone-200 bg-white px-4 py-4"
+                            >
+                              <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                                <div className="space-y-2">
+                                  <div className="text-sm font-medium text-stone-800">{document.display_filename}</div>
+                                  <div className="flex flex-wrap gap-2 text-xs text-stone-500">
+                                    <span>Revision {document.revision_number}</span>
+                                    <span>{document.chunk_count} chunks</span>
+                                    {document.locator_summary.map((locator) => (
+                                      <span key={`${document.knowledge_document_id}-${locator}`}>{locator}</span>
+                                    ))}
+                                  </div>
+                                </div>
+                                <button
+                                  type="button"
+                                  className="self-start text-xs text-rose-500 hover:underline"
+                                  aria-label={`Delete ${document.display_filename}`}
+                                  onClick={() => {
+                                    void handleDeleteKnowledgeDocument(document.knowledge_document_id);
+                                  }}
+                                >
+                                  Delete
+                                </button>
+                              </div>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </section>
+
                     {/* Active jobs */}
                     <section aria-label="Active jobs">
                       <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-stone-500 mb-3">
@@ -1573,11 +1662,28 @@ export default function App() {
                           {kbJobList.history.map((job) => (
                             <li
                               key={job.job_id}
-                              className="flex items-center justify-between rounded-xl border border-stone-200 bg-white px-4 py-3"
+                              className="rounded-xl border border-stone-200 bg-white px-4 py-3"
                             >
-                              <span className="text-sm text-stone-700">
-                                {job.file_count} file{job.file_count !== 1 ? "s" : ""} &mdash; {job.status}
-                              </span>
+                              <div className="flex items-center justify-between gap-3">
+                                <span className="text-sm text-stone-700">
+                                  {job.file_count} file{job.file_count !== 1 ? "s" : ""} &mdash; {job.status}
+                                </span>
+                              </div>
+                              {job.items && job.items.length > 0 ? (
+                                <ul className="mt-3 flex flex-col gap-2">
+                                  {job.items.map((item) => (
+                                    <li
+                                      key={item.item_id}
+                                      className="rounded-lg border border-stone-100 bg-stone-50 px-3 py-2 text-xs text-stone-600"
+                                    >
+                                      <span className="font-medium text-stone-700">{item.filename}</span>
+                                      {" | "}
+                                      <span>{item.outcome ?? item.status}</span>
+                                      {item.error_message ? ` | ${item.error_message}` : ""}
+                                    </li>
+                                  ))}
+                                </ul>
+                              ) : null}
                             </li>
                           ))}
                         </ul>

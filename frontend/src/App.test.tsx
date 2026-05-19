@@ -7,10 +7,12 @@ import {
   cancelImportJob,
   createImportJob,
   createWorkspace,
+  deleteKnowledgeBaseDocument,
   deleteConversation,
   getDefaultWorkspaceModel,
   getKnowledgeBaseSettings,
   getConversation,
+  listKnowledgeBaseDocuments,
   listArchivedWorkspaces,
   listKnowledgeBaseJobs,
   listModels,
@@ -30,10 +32,12 @@ vi.mock("./api", () => ({
   cancelImportJob: vi.fn(),
   createImportJob: vi.fn(),
   createWorkspace: vi.fn(),
+  deleteKnowledgeBaseDocument: vi.fn(),
   deleteConversation: vi.fn(),
   getDefaultWorkspaceModel: vi.fn(),
   getKnowledgeBaseSettings: vi.fn(),
   getConversation: vi.fn(),
+  listKnowledgeBaseDocuments: vi.fn(),
   listArchivedWorkspaces: vi.fn(),
   listKnowledgeBaseJobs: vi.fn(),
   listModels: vi.fn(),
@@ -72,11 +76,13 @@ vi.mock("./lib/sse", () => ({
 const mockedCancelImportJob = vi.mocked(cancelImportJob);
 const mockedCreateImportJob = vi.mocked(createImportJob);
 const mockedCreateWorkspace = vi.mocked(createWorkspace);
+const mockedDeleteKnowledgeBaseDocument = vi.mocked(deleteKnowledgeBaseDocument);
 const mockedDeleteConversation = vi.mocked(deleteConversation);
 const mockedGetDefaultWorkspaceModel = vi.mocked(getDefaultWorkspaceModel);
 const mockedGetKnowledgeBaseSettings = vi.mocked(getKnowledgeBaseSettings);
 const mockedGetConversation = vi.mocked(getConversation);
 const mockedArchiveWorkspace = vi.mocked(archiveWorkspace);
+const mockedListKnowledgeBaseDocuments = vi.mocked(listKnowledgeBaseDocuments);
 const mockedListArchivedWorkspaces = vi.mocked(listArchivedWorkspaces);
 const mockedListKnowledgeBaseJobs = vi.mocked(listKnowledgeBaseJobs);
 const mockedListModels = vi.mocked(listModels);
@@ -96,10 +102,12 @@ describe("App", () => {
     mockedCancelImportJob.mockReset();
     mockedCreateImportJob.mockReset();
     mockedCreateWorkspace.mockReset();
+    mockedDeleteKnowledgeBaseDocument.mockReset();
     mockedDeleteConversation.mockReset();
     mockedGetDefaultWorkspaceModel.mockReset();
     mockedGetKnowledgeBaseSettings.mockReset();
     mockedGetConversation.mockReset();
+    mockedListKnowledgeBaseDocuments.mockReset();
     mockedListArchivedWorkspaces.mockReset();
     mockedListKnowledgeBaseJobs.mockReset();
     mockedListModels.mockReset();
@@ -113,6 +121,7 @@ describe("App", () => {
     mockedUpdateWorkspace.mockReset();
     mockedReadSseStream.mockReset();
     mockedListArchivedWorkspaces.mockResolvedValue([]);
+    mockedListKnowledgeBaseDocuments.mockResolvedValue({ documents: [] });
     mockedListKnowledgeBaseJobs.mockResolvedValue({
       active: [],
       history: [],
@@ -1090,6 +1099,7 @@ describe("App", () => {
       knowledge_answering_default: false,
       rebuild_required: false,
     });
+    mockedListKnowledgeBaseDocuments.mockResolvedValue({ documents: [] });
 
     render(<App />);
 
@@ -1419,6 +1429,44 @@ describe("App", () => {
     expect(await screen.findByText(/queued/i)).toBeInTheDocument();
   });
 
+  it("polls knowledge base management while the screen stays open", async () => {
+    const user = userEvent.setup();
+
+    const queuedJob = {
+      job_id: "job-1",
+      workspace_id: "ws-kb",
+      status: "queued" as const,
+      file_count: 1,
+      created_at: "2026-05-19T01:00:00Z",
+      completed_at: null,
+    };
+
+    mockedCreateImportJob.mockResolvedValue(queuedJob);
+    mockedListKnowledgeBaseJobs.mockResolvedValue({
+      active: [queuedJob],
+      history: [],
+      history_total: 0,
+      history_page: 1,
+    });
+    mockedListKnowledgeBaseDocuments.mockResolvedValue({ documents: [] });
+
+    await openKnowledgeBaseManagement(user);
+
+    const fileInput = screen.getByLabelText("Select files to import");
+    await user.upload(fileInput, [new File(["content"], "guide.txt", { type: "text/plain" })]);
+    await user.click(screen.getByRole("button", { name: "Import files" }));
+
+    expect(await screen.findByText(/queued/i)).toBeInTheDocument();
+    const jobsCallsBeforePolling = mockedListKnowledgeBaseJobs.mock.calls.length;
+    const documentCallsBeforePolling = mockedListKnowledgeBaseDocuments.mock.calls.length;
+
+    await waitFor(
+      () => expect(mockedListKnowledgeBaseJobs.mock.calls.length).toBeGreaterThan(jobsCallsBeforePolling),
+      { timeout: 4000 },
+    );
+    expect(mockedListKnowledgeBaseDocuments.mock.calls.length).toBeGreaterThan(documentCallsBeforePolling);
+  }, 10000);
+
   it("shows running job status without a cancel button", async () => {
     const user = userEvent.setup();
 
@@ -1520,6 +1568,100 @@ describe("App", () => {
     expect(
       activeSection.compareDocumentPosition(historySection) & Node.DOCUMENT_POSITION_FOLLOWING
     ).toBeTruthy();
+  });
+
+  it("shows imported knowledge documents with chunk count and locator metadata", async () => {
+    const user = userEvent.setup();
+
+    mockedListKnowledgeBaseDocuments.mockResolvedValue({
+      documents: [
+        {
+          knowledge_document_id: "doc-1",
+          display_filename: "guide.txt",
+          revision_number: 2,
+          chunk_count: 3,
+          locator_summary: ["Page 1"],
+          created_at: "2026-05-19T01:00:00Z",
+          updated_at: "2026-05-19T02:00:00Z",
+        },
+      ],
+    });
+
+    await openKnowledgeBaseManagement(user);
+
+    expect(await screen.findByText("guide.txt")).toBeInTheDocument();
+    expect(screen.getByText(/revision 2/i)).toBeInTheDocument();
+    expect(screen.getByText(/3 chunks/i)).toBeInTheDocument();
+    expect(screen.getByText(/page 1/i)).toBeInTheDocument();
+  });
+
+  it("shows per-file outcomes and lets the user delete a knowledge document", async () => {
+    const user = userEvent.setup();
+
+    const existingDocument = {
+      knowledge_document_id: "doc-1",
+      display_filename: "guide.txt",
+      revision_number: 1,
+      chunk_count: 1,
+      locator_summary: ["Page 1"],
+      created_at: "2026-05-19T01:00:00Z",
+      updated_at: "2026-05-19T01:00:00Z",
+    };
+
+    mockedListKnowledgeBaseDocuments.mockResolvedValueOnce({
+      documents: [existingDocument],
+    });
+    mockedListKnowledgeBaseJobs.mockResolvedValueOnce({
+      active: [],
+      history: [
+        {
+          job_id: "job-history",
+          workspace_id: "ws-kb",
+          status: "failed" as const,
+          file_count: 2,
+          created_at: "2026-05-19T03:00:00Z",
+          completed_at: "2026-05-19T03:01:00Z",
+          items: [
+            {
+              item_id: "item-1",
+              filename: "guide.txt",
+              status: "imported",
+              outcome: "imported",
+              error_message: null,
+            },
+            {
+              item_id: "item-2",
+              filename: "slides.pdf",
+              status: "unsupported",
+              outcome: "unsupported",
+              error_message: "Unsupported file type: .pdf",
+            },
+          ],
+        },
+      ],
+      history_total: 1,
+      history_page: 1,
+    });
+    mockedDeleteKnowledgeBaseDocument.mockResolvedValue(undefined);
+    mockedListKnowledgeBaseDocuments.mockResolvedValue({
+      documents: [],
+    });
+    mockedListKnowledgeBaseJobs.mockResolvedValue({
+      active: [],
+      history: [],
+      history_total: 0,
+      history_page: 1,
+    });
+
+    await openKnowledgeBaseManagement(user);
+
+    expect(await screen.findByText(/slides\.pdf/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/unsupported/i).length).toBeGreaterThan(0);
+
+    await user.click(screen.getByRole("button", { name: "Delete guide.txt" }));
+
+    expect(mockedDeleteKnowledgeBaseDocument).toHaveBeenCalledWith("ws-kb", "doc-1");
+    await waitFor(() => expect(screen.queryByText("guide.txt")).not.toBeInTheDocument());
   });
 });
 

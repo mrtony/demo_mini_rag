@@ -75,6 +75,11 @@ class Workspace(Base):
         cascade="all, delete-orphan",
         lazy="selectin",
     )
+    knowledge_documents: Mapped[list["KnowledgeDocument"]] = relationship(
+        back_populates="workspace",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
 
 
 class WorkspaceModelSetting(Base):
@@ -143,7 +148,9 @@ class KnowledgeBaseJob(Base):
         DateTime(timezone=True),
         server_default=func.now(),
     )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     workspace: Mapped["Workspace"] = relationship(back_populates="knowledge_base_jobs", lazy="selectin")
     items: Mapped[list["KnowledgeBaseJobItem"]] = relationship(
@@ -164,14 +171,125 @@ class KnowledgeBaseJobItem(Base):
         index=True,
     )
     filename: Mapped[str] = mapped_column(String(255))
+    mime_type: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    native_file_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="pending")
+    outcome: Mapped[str | None] = mapped_column(String(20), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
     )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    knowledge_document_fk: Mapped[int | None] = mapped_column(
+        ForeignKey("knowledge_documents.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    knowledge_document_revision_fk: Mapped[int | None] = mapped_column(
+        ForeignKey("knowledge_document_revisions.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
 
     job: Mapped[KnowledgeBaseJob] = relationship(back_populates="items", lazy="selectin")
+    knowledge_document: Mapped["KnowledgeDocument | None"] = relationship(
+        back_populates="job_items",
+        foreign_keys=[knowledge_document_fk],
+        lazy="selectin",
+    )
+    knowledge_document_revision: Mapped["KnowledgeDocumentRevision | None"] = relationship(
+        back_populates="job_items",
+        foreign_keys=[knowledge_document_revision_fk],
+        lazy="selectin",
+    )
+
+
+class KnowledgeDocument(Base):
+    __tablename__ = "knowledge_documents"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    workspace_fk: Mapped[int] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        index=True,
+    )
+    knowledge_document_id: Mapped[str] = mapped_column(String(36), unique=True, index=True)
+    display_filename: Mapped[str] = mapped_column(String(255))
+    current_revision_fk: Mapped[int | None] = mapped_column(
+        ForeignKey("knowledge_document_revisions.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    workspace: Mapped["Workspace"] = relationship(back_populates="knowledge_documents", lazy="selectin")
+    revisions: Mapped[list["KnowledgeDocumentRevision"]] = relationship(
+        back_populates="knowledge_document",
+        cascade="all, delete-orphan",
+        foreign_keys="KnowledgeDocumentRevision.knowledge_document_fk",
+        order_by="KnowledgeDocumentRevision.revision_number",
+        lazy="selectin",
+    )
+    current_revision: Mapped["KnowledgeDocumentRevision | None"] = relationship(
+        foreign_keys=[current_revision_fk],
+        post_update=True,
+        lazy="selectin",
+    )
+    job_items: Mapped[list["KnowledgeBaseJobItem"]] = relationship(
+        back_populates="knowledge_document",
+        foreign_keys="KnowledgeBaseJobItem.knowledge_document_fk",
+        lazy="selectin",
+    )
+
+
+class KnowledgeDocumentRevision(Base):
+    __tablename__ = "knowledge_document_revisions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    knowledge_document_fk: Mapped[int] = mapped_column(
+        ForeignKey("knowledge_documents.id", ondelete="CASCADE"),
+        index=True,
+    )
+    revision_number: Mapped[int] = mapped_column(Integer, default=1)
+    content_hash: Mapped[str] = mapped_column(String(64), index=True)
+    mime_type: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    native_file_path: Mapped[str] = mapped_column(Text)
+    normalized_markdown_text: Mapped[str] = mapped_column(Text)
+    page_or_slide_map_json: Mapped[str] = mapped_column(Text, default="[]")
+    chunk_count: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(20), default="completed")
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    knowledge_document: Mapped["KnowledgeDocument"] = relationship(
+        back_populates="revisions",
+        foreign_keys=[knowledge_document_fk],
+        lazy="selectin",
+    )
+    job_items: Mapped[list["KnowledgeBaseJobItem"]] = relationship(
+        back_populates="knowledge_document_revision",
+        foreign_keys="KnowledgeBaseJobItem.knowledge_document_revision_fk",
+        lazy="selectin",
+    )
 
 
 class Conversation(Base):

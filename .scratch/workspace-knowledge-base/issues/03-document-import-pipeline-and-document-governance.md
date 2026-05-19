@@ -29,3 +29,11 @@ Type: AFK
 ## Blocked by
 
 - [.scratch/workspace-knowledge-base/issues/02-async-import-jobs-and-management-status.md](</D:/mygithub/demo_mini_rag/.scratch/workspace-knowledge-base/issues/02-async-import-jobs-and-management-status.md>)
+
+## Comments
+
+### 2026-05-19 實作補充
+
+- 已補上自動 import queue processing；先前只會建立 `queued` job，但沒有背景處理器自動推進，導致 UI 只看得到 job 建立卻長時間不會完成。現況為 FastAPI process 內的背景 queue worker 自動處理同 workspace 的 import jobs。
+- 已補上 PDF 匯入支援；先前雖然目標技術路徑是 `MarkItDown + LlamaIndex + fastembed + Qdrant`，但實作曾先以副檔名白名單與 UTF-8 純文字檢查擋住 `.pdf`，造成 UI 顯示 `failed/unsupported`。現況已改為讓 PDF 直接走 MarkItDown conversion，並補齊 `markitdown[pdf]` 相關依賴。
+- 目前實際可成功走完整匯入路徑的格式至少包含 `.txt`、`.md`、`.markdown` 與 `.pdf`；其餘格式若尚未接通，應明確落在 per-file `unsupported` outcome，而不是靜默失敗。
