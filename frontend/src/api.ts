@@ -3,6 +3,8 @@ import type {
   ChatStreamRequest,
   ConversationDetail,
   ConversationSummary,
+  KnowledgeBaseJob,
+  KnowledgeBaseJobList,
   KnowledgeBaseSettings,
   ModelCatalogEntry,
   ModelCatalogSummary,
@@ -26,6 +28,36 @@ async function expectJson<T>(response: Response): Promise<T> {
     throw new Error(message);
   }
   return (await response.json()) as T;
+}
+
+export async function createImportJob(workspaceId: string, files: File[]): Promise<KnowledgeBaseJob> {
+  const formData = new FormData();
+  for (const file of files) {
+    formData.append("files", file);
+  }
+  const response = await fetch(`${API_BASE}/api/workspaces/${workspaceId}/knowledge-base/import`, {
+    method: "POST",
+    body: formData,
+  });
+  return expectJson<KnowledgeBaseJob>(response);
+}
+
+export async function listKnowledgeBaseJobs(
+  workspaceId: string,
+  historyPage = 1,
+): Promise<KnowledgeBaseJobList> {
+  const response = await fetch(
+    `${API_BASE}/api/workspaces/${workspaceId}/knowledge-base/jobs?history_page=${historyPage}`,
+  );
+  return expectJson<KnowledgeBaseJobList>(response);
+}
+
+export async function cancelImportJob(workspaceId: string, jobId: string): Promise<KnowledgeBaseJob> {
+  const response = await fetch(
+    `${API_BASE}/api/workspaces/${workspaceId}/knowledge-base/jobs/${jobId}/cancel`,
+    { method: "POST" },
+  );
+  return expectJson<KnowledgeBaseJob>(response);
 }
 
 export async function listWorkspaces(): Promise<WorkspaceSummary[]> {

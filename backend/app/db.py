@@ -102,6 +102,8 @@ def _requires_schema_reset(sync_connection) -> bool:
         return True
     if "workspace_knowledge_base_settings" not in table_names:
         return True
+    if "knowledge_base_jobs" not in table_names:
+        return True
     conversation_columns = {column["name"] for column in inspector.get_columns("conversations")}
     model_catalog_columns = {column["name"] for column in inspector.get_columns("model_catalog")}
     return (

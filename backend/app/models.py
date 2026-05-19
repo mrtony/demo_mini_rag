@@ -70,6 +70,11 @@ class Workspace(Base):
         cascade="all, delete-orphan",
         lazy="selectin",
     )
+    knowledge_base_jobs: Mapped[list["KnowledgeBaseJob"]] = relationship(
+        back_populates="workspace",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
 
 
 class WorkspaceModelSetting(Base):
@@ -121,6 +126,52 @@ class WorkspaceKnowledgeBaseSetting(Base):
     )
 
     workspace: Mapped[Workspace] = relationship(back_populates="knowledge_base_setting", lazy="selectin")
+
+
+class KnowledgeBaseJob(Base):
+    __tablename__ = "knowledge_base_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    job_id: Mapped[str] = mapped_column(String(36), unique=True, index=True)
+    workspace_fk: Mapped[int] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        index=True,
+    )
+    status: Mapped[str] = mapped_column(String(20), default="queued")
+    file_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    workspace: Mapped["Workspace"] = relationship(back_populates="knowledge_base_jobs", lazy="selectin")
+    items: Mapped[list["KnowledgeBaseJobItem"]] = relationship(
+        back_populates="job",
+        cascade="all, delete-orphan",
+        order_by="KnowledgeBaseJobItem.id",
+        lazy="selectin",
+    )
+
+
+class KnowledgeBaseJobItem(Base):
+    __tablename__ = "knowledge_base_job_items"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    item_id: Mapped[str] = mapped_column(String(36), unique=True, index=True)
+    job_fk: Mapped[int] = mapped_column(
+        ForeignKey("knowledge_base_jobs.id", ondelete="CASCADE"),
+        index=True,
+    )
+    filename: Mapped[str] = mapped_column(String(255))
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+    job: Mapped[KnowledgeBaseJob] = relationship(back_populates="items", lazy="selectin")
 
 
 class Conversation(Base):

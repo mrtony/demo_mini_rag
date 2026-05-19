@@ -48,6 +48,22 @@ export type KnowledgeBaseSettings = {
   rebuild_required: boolean;
 };
 
+export type KnowledgeBaseJob = {
+  job_id: string;
+  workspace_id: string;
+  status: "queued" | "running" | "completed" | "failed" | "canceled";
+  file_count: number;
+  created_at: string;
+  completed_at: string | null;
+};
+
+export type KnowledgeBaseJobList = {
+  active: KnowledgeBaseJob[];
+  history: KnowledgeBaseJob[];
+  history_total: number;
+  history_page: number;
+};
+
 export type ConversationSummary = {
   workspace_id: string;
   conversation_id: string;

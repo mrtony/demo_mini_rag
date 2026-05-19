@@ -4,12 +4,15 @@ import { useEffect, useRef, useState } from "react";
 import "./App.css";
 import {
   archiveWorkspace,
+  cancelImportJob,
+  createImportJob,
   createWorkspace,
   deleteConversation,
   getDefaultWorkspaceModel,
   getKnowledgeBaseSettings,
   getConversation,
   listArchivedWorkspaces,
+  listKnowledgeBaseJobs,
   listModels,
   listWorkspaceConversations,
   listWorkspaces,
@@ -34,6 +37,8 @@ import { readSseStream } from "./lib/sse";
 import type {
   ChatBubble,
   ConversationSummary,
+  KnowledgeBaseJob,
+  KnowledgeBaseJobList,
   KnowledgeBaseSettings,
   ModelCatalogEntry,
   ModelSettingSchema,
@@ -299,6 +304,15 @@ export default function App() {
   const [knowledgeBaseSettingsDraft, setKnowledgeBaseSettingsDraft] = useState<KnowledgeBaseSettingsDraft | null>(null);
   const [isKnowledgeBaseSettingsLoading, setIsKnowledgeBaseSettingsLoading] = useState(false);
   const [isKnowledgeBaseManagementOpen, setIsKnowledgeBaseManagementOpen] = useState(false);
+  const [kbJobList, setKbJobList] = useState<KnowledgeBaseJobList>({
+    active: [],
+    history: [],
+    history_total: 0,
+    history_page: 1,
+  });
+  const [isKbJobsLoading, setIsKbJobsLoading] = useState(false);
+  const [selectedImportFiles, setSelectedImportFiles] = useState<File[]>([]);
+  const [isImporting, setIsImporting] = useState(false);
   const [activeSettingsTab, setActiveSettingsTab] = useState<"general" | "model" | "knowledgeBase">("general");
   const abortRef = useRef<AbortController | null>(null);
   const activeWorkspaceIdRef = useRef<string | null>(null);
@@ -980,6 +994,43 @@ export default function App() {
     setSettingsDraft(null);
     setKnowledgeBaseSettingsDraft(null);
     setActiveSettingsTab("knowledgeBase");
+    void loadKbJobs(activeWorkspace.workspace_id);
+  }
+
+  async function loadKbJobs(workspaceId: string, page = 1) {
+    setIsKbJobsLoading(true);
+    try {
+      const result = await listKnowledgeBaseJobs(workspaceId, page);
+      setKbJobList(result);
+    } catch {
+      // Ignore load errors; jobs list will stay empty.
+    } finally {
+      setIsKbJobsLoading(false);
+    }
+  }
+
+  async function handleImportFiles() {
+    if (!activeWorkspace || selectedImportFiles.length === 0) return;
+    setIsImporting(true);
+    try {
+      await createImportJob(activeWorkspace.workspace_id, selectedImportFiles);
+      setSelectedImportFiles([]);
+      await loadKbJobs(activeWorkspace.workspace_id);
+    } catch {
+      // Ignore import errors for this slice.
+    } finally {
+      setIsImporting(false);
+    }
+  }
+
+  async function handleCancelJob(jobId: string) {
+    if (!activeWorkspace) return;
+    try {
+      await cancelImportJob(activeWorkspace.workspace_id, jobId);
+      await loadKbJobs(activeWorkspace.workspace_id);
+    } catch {
+      // Ignore cancel errors.
+    }
   }
 
   function backToWorkspaceSettingsFromKnowledgeBaseManagement() {
@@ -1433,26 +1484,116 @@ export default function App() {
                         <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-stone-500">
                           Workspace knowledge base
                         </p>
-                        <h3 className="mt-2 font-['Iowan_Old_Style','Palatino_Linotype','Noto_Serif_TC',serif] text-2xl font-semibold tracking-[-0.03em] text-stone-950">
-                          Empty shell for documents, rebuilds, and job history
-                        </h3>
-                      </div>
-                      <div className="rounded-full bg-stone-100 px-3 py-1 text-xs text-stone-500">
-                        Management stays separate from settings edits
                       </div>
                     </div>
 
-                    <div className="rounded-[1.75rem] border border-dashed border-stone-300 bg-stone-50/80 px-6 py-8">
+                    {/* Upload section */}
+                    <div className="rounded-[1.75rem] border border-stone-200 bg-stone-50/80 px-6 py-6 flex flex-col gap-4">
                       <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-stone-500">
-                        Knowledge Base Management
+                        Import documents
                       </p>
-                      <h4 className="mt-3 text-xl font-semibold tracking-[-0.02em] text-stone-950">
-                        No knowledge documents yet
-                      </h4>
-                      <p className="mt-3 max-w-2xl text-sm leading-7 text-stone-600">
-                        Import and rebuild flows will connect here in the next slices.
-                      </p>
+                      <div className="flex flex-wrap items-center gap-3">
+                        <label
+                          htmlFor="kb-file-input"
+                          className="cursor-pointer rounded-xl border border-stone-200 bg-white px-4 py-2 text-sm font-medium text-stone-700 hover:border-stone-300 hover:bg-stone-50"
+                        >
+                          Select files to import
+                          <input
+                            id="kb-file-input"
+                            type="file"
+                            multiple
+                            aria-label="Select files to import"
+                            className="sr-only"
+                            onChange={(e) => {
+                              const files = Array.from(e.target.files ?? []);
+                              setSelectedImportFiles(files);
+                            }}
+                          />
+                        </label>
+                        {selectedImportFiles.length > 0 && (
+                          <span className="text-sm text-stone-600">
+                            {selectedImportFiles.length} file{selectedImportFiles.length !== 1 ? "s" : ""} selected
+                          </span>
+                        )}
+                        <button
+                          type="button"
+                          className="rounded-xl bg-stone-900 px-4 py-2 text-sm font-medium text-white hover:bg-stone-700 disabled:opacity-50"
+                          disabled={selectedImportFiles.length === 0 || isImporting}
+                          onClick={() => { void handleImportFiles(); }}
+                        >
+                          Import files
+                        </button>
+                      </div>
                     </div>
+
+                    {/* Active jobs */}
+                    <section aria-label="Active jobs">
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-stone-500 mb-3">
+                        Active jobs
+                      </p>
+                      {isKbJobsLoading ? (
+                        <p className="text-sm text-stone-500">Loading…</p>
+                      ) : kbJobList.active.length === 0 ? (
+                        <p className="text-sm text-stone-400">No active import jobs.</p>
+                      ) : (
+                        <ul className="flex flex-col gap-2">
+                          {kbJobList.active.map((job) => (
+                            <li
+                              key={job.job_id}
+                              className="flex items-center justify-between rounded-xl border border-stone-200 bg-white px-4 py-3"
+                            >
+                              <span className="text-sm text-stone-700">
+                                {job.file_count} file{job.file_count !== 1 ? "s" : ""} &mdash; {job.status}
+                              </span>
+                              {job.status === "queued" && (
+                                <button
+                                  type="button"
+                                  aria-label="Cancel job"
+                                  className="text-xs text-rose-500 hover:underline"
+                                  onClick={() => { void handleCancelJob(job.job_id); }}
+                                >
+                                  Cancel
+                                </button>
+                              )}
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </section>
+
+                    {/* Job history */}
+                    <section aria-label="Job history">
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-stone-500 mb-3">
+                        Job history
+                      </p>
+                      {kbJobList.history.length === 0 ? (
+                        <p className="text-sm text-stone-400">No job history yet.</p>
+                      ) : (
+                        <ul className="flex flex-col gap-2">
+                          {kbJobList.history.map((job) => (
+                            <li
+                              key={job.job_id}
+                              className="flex items-center justify-between rounded-xl border border-stone-200 bg-white px-4 py-3"
+                            >
+                              <span className="text-sm text-stone-700">
+                                {job.file_count} file{job.file_count !== 1 ? "s" : ""} &mdash; {job.status}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                      {kbJobList.history_total > kbJobList.history.length && (
+                        <button
+                          type="button"
+                          className="mt-3 text-sm text-stone-500 hover:text-stone-700"
+                          onClick={() => {
+                            void loadKbJobs(activeWorkspace.workspace_id, kbJobList.history_page + 1);
+                          }}
+                        >
+                          Load more history
+                        </button>
+                      )}
+                    </section>
                   </div>
                 </section>
 

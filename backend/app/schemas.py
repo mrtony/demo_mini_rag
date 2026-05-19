@@ -99,6 +99,29 @@ class KnowledgeBaseSettingsSummary(BaseModel):
     rebuild_required: bool
 
 
+class KnowledgeBaseJobItemSummary(BaseModel):
+    item_id: str
+    filename: str
+    status: str
+    error_message: str | None = None
+
+
+class KnowledgeBaseJobSummary(BaseModel):
+    job_id: str
+    workspace_id: str
+    status: str
+    file_count: int
+    created_at: datetime
+    completed_at: datetime | None = None
+
+
+class KnowledgeBaseJobListResponse(BaseModel):
+    active: list[KnowledgeBaseJobSummary]
+    history: list[KnowledgeBaseJobSummary]
+    history_total: int
+    history_page: int
+
+
 class ConversationSummary(BaseModel):
     workspace_id: str
     conversation_id: str

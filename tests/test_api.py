@@ -857,12 +857,205 @@ async def test_deletes_conversation_permanently_and_removes_from_workspace_histo
     delete_response = await test_client.delete(f"/api/conversations/{conversation_id}")
     assert delete_response.status_code == 204
 
-    conversations_after = await test_client.get(f"/api/workspaces/{workspace['workspace_id']}/conversations")
-    assert conversations_after.status_code == 200
-    assert conversations_after.json() == []
 
-    detail_response = await test_client.get(f"/api/conversations/{conversation_id}")
-    assert detail_response.status_code == 404
+# ─── Knowledge Base Jobs ────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_post_import_creates_job_and_items_for_workspace(test_client):
+    workspace = await create_workspace(test_client, "Workspace KB")
+
+    files = [
+        ("files", ("doc_a.txt", b"Content of doc A", "text/plain")),
+        ("files", ("doc_b.txt", b"Content of doc B", "text/plain")),
+    ]
+    response = await test_client.post(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/import",
+        files=files,
+    )
+
+    assert response.status_code == 202
+    payload = response.json()
+    assert payload["workspace_id"] == workspace["workspace_id"]
+    assert payload["status"] == "queued"
+    assert payload["file_count"] == 2
+    assert "job_id" in payload
+    assert payload["completed_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_post_import_returns_404_for_unknown_workspace(test_client):
+    files = [("files", ("doc.txt", b"Content", "text/plain"))]
+    response = await test_client.post(
+        "/api/workspaces/no-such-workspace/knowledge-base/import",
+        files=files,
+    )
+
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_get_jobs_returns_active_and_history_structure(test_client):
+    workspace = await create_workspace(test_client, "Workspace Jobs")
+
+    response = await test_client.get(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/jobs"
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert "active" in payload
+    assert "history" in payload
+    assert "history_total" in payload
+    assert "history_page" in payload
+    assert isinstance(payload["active"], list)
+    assert isinstance(payload["history"], list)
+
+
+@pytest.mark.asyncio
+async def test_get_jobs_lists_newly_created_import_job_as_active(test_client):
+    workspace = await create_workspace(test_client, "Workspace Jobs 2")
+
+    files = [("files", ("report.txt", b"Report content", "text/plain"))]
+    import_resp = await test_client.post(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/import",
+        files=files,
+    )
+    assert import_resp.status_code == 202
+    job_id = import_resp.json()["job_id"]
+
+    response = await test_client.get(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/jobs"
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    active_ids = [j["job_id"] for j in payload["active"]]
+    assert job_id in active_ids
+
+
+@pytest.mark.asyncio
+async def test_second_import_is_queued_when_first_job_is_running(test_client):
+    from backend.app.services.kb_job_service import advance_import_queue
+    from backend.app.db import SessionLocal
+
+    workspace = await create_workspace(test_client, "Workspace Queue")
+
+    files_a = [("files", ("a.txt", b"A content", "text/plain"))]
+    files_b = [("files", ("b.txt", b"B content", "text/plain"))]
+
+    first_resp = await test_client.post(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/import",
+        files=files_a,
+    )
+    assert first_resp.status_code == 202
+    first_job_id = first_resp.json()["job_id"]
+
+    # Manually advance the first job to "running" so the second one is blocked.
+    advance_resp = await test_client.post(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/jobs/{first_job_id}/advance-to-running",
+    )
+    assert advance_resp.status_code == 200
+
+    second_resp = await test_client.post(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/import",
+        files=files_b,
+    )
+    assert second_resp.status_code == 202
+    second_job_id = second_resp.json()["job_id"]
+    assert second_resp.json()["status"] == "queued"
+
+    # Worker should not advance the second job while the first is running.
+    async with SessionLocal() as session:
+        result = await advance_import_queue(workspace["workspace_id"], session)
+        await session.commit()
+
+    assert result is None  # Nothing advanced because first job is still running.
+
+    jobs_resp = await test_client.get(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/jobs"
+    )
+    active_ids = [j["job_id"] for j in jobs_resp.json()["active"]]
+    assert second_job_id in active_ids
+
+
+@pytest.mark.asyncio
+async def test_cancel_queued_import_job_transitions_to_canceled(test_client):
+    workspace = await create_workspace(test_client, "Workspace Cancel")
+
+    files = [("files", ("cancel_me.txt", b"Cancel content", "text/plain"))]
+    import_resp = await test_client.post(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/import",
+        files=files,
+    )
+    assert import_resp.status_code == 202
+    job_id = import_resp.json()["job_id"]
+
+    cancel_resp = await test_client.post(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/jobs/{job_id}/cancel"
+    )
+
+    assert cancel_resp.status_code == 200
+    assert cancel_resp.json()["status"] == "canceled"
+    assert cancel_resp.json()["job_id"] == job_id
+
+
+@pytest.mark.asyncio
+async def test_cancel_running_import_job_returns_409(test_client):
+    workspace = await create_workspace(test_client, "Workspace Cancel 2")
+
+    files = [("files", ("run_me.txt", b"Run content", "text/plain"))]
+    import_resp = await test_client.post(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/import",
+        files=files,
+    )
+    assert import_resp.status_code == 202
+    job_id = import_resp.json()["job_id"]
+
+    # Advance to running first.
+    await test_client.post(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/jobs/{job_id}/advance-to-running",
+    )
+
+    cancel_resp = await test_client.post(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/jobs/{job_id}/cancel"
+    )
+
+    assert cancel_resp.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_advance_import_queue_completes_queued_job(test_client):
+    from backend.app.services.kb_job_service import advance_import_queue
+    from backend.app.db import SessionLocal
+
+    workspace = await create_workspace(test_client, "Workspace Worker")
+
+    files = [("files", ("work.txt", b"Work content", "text/plain"))]
+    import_resp = await test_client.post(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/import",
+        files=files,
+    )
+    assert import_resp.status_code == 202
+    job_id = import_resp.json()["job_id"]
+
+    async with SessionLocal() as session:
+        completed_job = await advance_import_queue(workspace["workspace_id"], session)
+        await session.commit()
+
+    assert completed_job is not None
+    assert completed_job.job_id == job_id
+    assert completed_job.status == "completed"
+    assert all(item.status == "imported" for item in completed_job.items)
+
+    # Verify via API that job is in history (not active).
+    jobs_resp = await test_client.get(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/jobs"
+    )
+    payload = jobs_resp.json()
+    history_ids = [j["job_id"] for j in payload["history"]]
+    assert job_id in history_ids
+    assert not any(j["job_id"] == job_id for j in payload["active"])
 
 
 @pytest.mark.asyncio

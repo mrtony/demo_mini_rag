@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,6 +19,8 @@ from .config import Settings, get_settings
 from .db import SessionLocal, get_db_session
 from .models import (
     Conversation,
+    KnowledgeBaseJob,
+    KnowledgeBaseJobItem,
     Message,
     ModelCatalog,
     Workspace,
@@ -29,6 +31,8 @@ from .schemas import (
     ChatStreamRequest,
     ConversationDetail,
     ConversationSummary,
+    KnowledgeBaseJobListResponse,
+    KnowledgeBaseJobSummary,
     KnowledgeBaseSettingsSummary,
     KnowledgeBaseSettingsUpdateRequest,
     ModelCatalogEntry,
@@ -40,6 +44,7 @@ from .schemas import (
     WorkspaceSummary,
 )
 from .services.chat_service import ChatService
+from .services.kb_job_service import advance_import_queue, has_running_job
 from .sse import format_sse_event, iter_sse
 
 
@@ -147,6 +152,17 @@ def _serialize_knowledge_base_settings(
         similarity_threshold=settings.similarity_threshold,
         knowledge_answering_default=settings.knowledge_answering_default,
         rebuild_required=settings.rebuild_required,
+    )
+
+
+def _serialize_kb_job(job: KnowledgeBaseJob) -> KnowledgeBaseJobSummary:
+    return KnowledgeBaseJobSummary(
+        job_id=job.job_id,
+        workspace_id=job.workspace.workspace_id,
+        status=job.status,
+        file_count=job.file_count,
+        created_at=job.created_at,
+        completed_at=job.completed_at,
     )
 
 
@@ -960,3 +976,162 @@ async def stream_chat(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+# ─── Knowledge Base Jobs ────────────────────────────────────────────────────
+
+_ACTIVE_JOB_STATUSES = ("queued", "running")
+_HISTORY_JOB_STATUSES = ("completed", "failed", "canceled")
+
+
+@router.post(
+    "/workspaces/{workspace_id}/knowledge-base/import",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=KnowledgeBaseJobSummary,
+)
+async def create_knowledge_base_import_job(
+    workspace_id: str,
+    files: list[UploadFile] = File(...),
+    session: AsyncSession = Depends(get_db_session),
+) -> KnowledgeBaseJobSummary:
+    workspace = await _load_workspace_or_404(session, workspace_id)
+
+    job = KnowledgeBaseJob(
+        job_id=str(uuid4()),
+        workspace_fk=workspace.id,
+        status="queued",
+        file_count=len(files),
+    )
+    session.add(job)
+    await session.flush()
+
+    for upload in files:
+        item = KnowledgeBaseJobItem(
+            item_id=str(uuid4()),
+            job_fk=job.id,
+            filename=upload.filename or "unknown",
+            status="pending",
+        )
+        session.add(item)
+
+    await session.commit()
+    await session.refresh(job)
+    return _serialize_kb_job(job)
+
+
+@router.get(
+    "/workspaces/{workspace_id}/knowledge-base/jobs",
+    response_model=KnowledgeBaseJobListResponse,
+)
+async def list_knowledge_base_jobs(
+    workspace_id: str,
+    history_page: int = 1,
+    history_page_size: int = 20,
+    session: AsyncSession = Depends(get_db_session),
+) -> KnowledgeBaseJobListResponse:
+    workspace = await _load_workspace_or_404(session, workspace_id)
+
+    active_result = await session.execute(
+        select(KnowledgeBaseJob)
+        .where(
+            KnowledgeBaseJob.workspace_fk == workspace.id,
+            KnowledgeBaseJob.status.in_(_ACTIVE_JOB_STATUSES),
+        )
+        .order_by(KnowledgeBaseJob.id.asc())
+    )
+    active_jobs = active_result.scalars().all()
+
+    history_offset = (history_page - 1) * history_page_size
+    history_result = await session.execute(
+        select(KnowledgeBaseJob)
+        .where(
+            KnowledgeBaseJob.workspace_fk == workspace.id,
+            KnowledgeBaseJob.status.in_(_HISTORY_JOB_STATUSES),
+        )
+        .order_by(KnowledgeBaseJob.id.desc())
+        .offset(history_offset)
+        .limit(history_page_size)
+    )
+    history_jobs = history_result.scalars().all()
+
+    count_result = await session.execute(
+        select(func.count()).select_from(KnowledgeBaseJob).where(
+            KnowledgeBaseJob.workspace_fk == workspace.id,
+            KnowledgeBaseJob.status.in_(_HISTORY_JOB_STATUSES),
+        )
+    )
+    history_total: int = count_result.scalar_one()
+
+    return KnowledgeBaseJobListResponse(
+        active=[_serialize_kb_job(j) for j in active_jobs],
+        history=[_serialize_kb_job(j) for j in history_jobs],
+        history_total=history_total,
+        history_page=history_page,
+    )
+
+
+@router.post(
+    "/workspaces/{workspace_id}/knowledge-base/jobs/{job_id}/cancel",
+    response_model=KnowledgeBaseJobSummary,
+)
+async def cancel_knowledge_base_job(
+    workspace_id: str,
+    job_id: str,
+    session: AsyncSession = Depends(get_db_session),
+) -> KnowledgeBaseJobSummary:
+    workspace = await _load_workspace_or_404(session, workspace_id)
+
+    result = await session.execute(
+        select(KnowledgeBaseJob).where(
+            KnowledgeBaseJob.job_id == job_id,
+            KnowledgeBaseJob.workspace_fk == workspace.id,
+        )
+    )
+    job = result.scalar_one_or_none()
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+
+    if job.status != "queued":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Only queued jobs can be canceled",
+        )
+
+    job.status = "canceled"
+    await session.commit()
+    await session.refresh(job)
+    return _serialize_kb_job(job)
+
+
+@router.post(
+    "/workspaces/{workspace_id}/knowledge-base/jobs/{job_id}/advance-to-running",
+    response_model=KnowledgeBaseJobSummary,
+)
+async def _advance_job_to_running(
+    workspace_id: str,
+    job_id: str,
+    session: AsyncSession = Depends(get_db_session),
+) -> KnowledgeBaseJobSummary:
+    """Test-only helper: advance a queued job to running status."""
+    workspace = await _load_workspace_or_404(session, workspace_id)
+
+    result = await session.execute(
+        select(KnowledgeBaseJob).where(
+            KnowledgeBaseJob.job_id == job_id,
+            KnowledgeBaseJob.workspace_fk == workspace.id,
+        )
+    )
+    job = result.scalar_one_or_none()
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+
+    if job.status != "queued":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Only queued jobs can be advanced to running",
+        )
+
+    job.status = "running"
+    await session.commit()
+    await session.refresh(job)
+    return _serialize_kb_job(job)

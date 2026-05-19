@@ -4,12 +4,15 @@ import userEvent from "@testing-library/user-event";
 import App from "./App";
 import {
   archiveWorkspace,
+  cancelImportJob,
+  createImportJob,
   createWorkspace,
   deleteConversation,
   getDefaultWorkspaceModel,
   getKnowledgeBaseSettings,
   getConversation,
   listArchivedWorkspaces,
+  listKnowledgeBaseJobs,
   listModels,
   listWorkspaceConversations,
   listWorkspaces,
@@ -24,12 +27,15 @@ import { readSseStream } from "./lib/sse";
 
 vi.mock("./api", () => ({
   archiveWorkspace: vi.fn(),
+  cancelImportJob: vi.fn(),
+  createImportJob: vi.fn(),
   createWorkspace: vi.fn(),
   deleteConversation: vi.fn(),
   getDefaultWorkspaceModel: vi.fn(),
   getKnowledgeBaseSettings: vi.fn(),
   getConversation: vi.fn(),
   listArchivedWorkspaces: vi.fn(),
+  listKnowledgeBaseJobs: vi.fn(),
   listModels: vi.fn(),
   listWorkspaceConversations: vi.fn(),
   listWorkspaces: vi.fn(),
@@ -63,6 +69,8 @@ vi.mock("./lib/sse", () => ({
   readSseStream: vi.fn(),
 }));
 
+const mockedCancelImportJob = vi.mocked(cancelImportJob);
+const mockedCreateImportJob = vi.mocked(createImportJob);
 const mockedCreateWorkspace = vi.mocked(createWorkspace);
 const mockedDeleteConversation = vi.mocked(deleteConversation);
 const mockedGetDefaultWorkspaceModel = vi.mocked(getDefaultWorkspaceModel);
@@ -70,6 +78,7 @@ const mockedGetKnowledgeBaseSettings = vi.mocked(getKnowledgeBaseSettings);
 const mockedGetConversation = vi.mocked(getConversation);
 const mockedArchiveWorkspace = vi.mocked(archiveWorkspace);
 const mockedListArchivedWorkspaces = vi.mocked(listArchivedWorkspaces);
+const mockedListKnowledgeBaseJobs = vi.mocked(listKnowledgeBaseJobs);
 const mockedListModels = vi.mocked(listModels);
 const mockedListWorkspaceConversations = vi.mocked(listWorkspaceConversations);
 const mockedListWorkspaces = vi.mocked(listWorkspaces);
@@ -84,12 +93,15 @@ const mockedReadSseStream = vi.mocked(readSseStream);
 describe("App", () => {
   beforeEach(() => {
     mockedArchiveWorkspace.mockReset();
+    mockedCancelImportJob.mockReset();
+    mockedCreateImportJob.mockReset();
     mockedCreateWorkspace.mockReset();
     mockedDeleteConversation.mockReset();
     mockedGetDefaultWorkspaceModel.mockReset();
     mockedGetKnowledgeBaseSettings.mockReset();
     mockedGetConversation.mockReset();
     mockedListArchivedWorkspaces.mockReset();
+    mockedListKnowledgeBaseJobs.mockReset();
     mockedListModels.mockReset();
     mockedListWorkspaceConversations.mockReset();
     mockedListWorkspaces.mockReset();
@@ -101,6 +113,12 @@ describe("App", () => {
     mockedUpdateWorkspace.mockReset();
     mockedReadSseStream.mockReset();
     mockedListArchivedWorkspaces.mockResolvedValue([]);
+    mockedListKnowledgeBaseJobs.mockResolvedValue({
+      active: [],
+      history: [],
+      history_total: 0,
+      history_page: 1,
+    });
     mockedGetKnowledgeBaseSettings.mockResolvedValue({
       workspace_id: "ws-default",
       chunk_size: 800,
@@ -1080,8 +1098,8 @@ describe("App", () => {
     await user.click(await screen.findByRole("button", { name: "Open Knowledge Base Management" }));
 
     expect(await screen.findByRole("heading", { name: "Knowledge Base Management" })).toBeInTheDocument();
-    expect(screen.getByText("No knowledge documents yet")).toBeInTheDocument();
-    expect(screen.getByText("Import and rebuild flows will connect here in the next slices.")).toBeInTheDocument();
+    expect(screen.getByLabelText("Select files to import")).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Active jobs" })).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Back to Workspace Settings" }));
 
@@ -1313,4 +1331,195 @@ describe("App", () => {
 
     confirmSpy.mockRestore();
   });
+
+  // ─── Knowledge Base Jobs ────────────────────────────────────────────────────
+
+  function makeKbWorkspace() {
+    return {
+      workspace_id: "ws-kb",
+      name: "Workspace KB",
+      system_message: "KB system message",
+      selected_model: {
+        model_id: "gpt-5.4-nano",
+        label: "gpt-5.4-nano",
+        is_enabled: true,
+        is_default_workspace_model: true,
+      },
+      model_settings: { temperature: 0.7 },
+      created_at: "2026-05-19T00:00:00Z",
+      updated_at: "2026-05-19T00:00:00Z",
+    };
+  }
+
+  async function openKnowledgeBaseManagement(user: ReturnType<typeof userEvent.setup>) {
+    mockedListWorkspaces.mockResolvedValue([makeKbWorkspace()]);
+    mockedListWorkspaceConversations.mockResolvedValue([]);
+    mockedGetKnowledgeBaseSettings.mockResolvedValue({
+      workspace_id: "ws-kb",
+      chunk_size: 800,
+      chunk_overlap: 200,
+      retrieval_top_k: 8,
+      similarity_threshold: 0.2,
+      knowledge_answering_default: false,
+      rebuild_required: false,
+    });
+
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "Open workspace settings" }));
+    await user.click(await screen.findByRole("tab", { name: "Knowledge Base" }));
+    await user.click(await screen.findByRole("button", { name: "Open Knowledge Base Management" }));
+    expect(await screen.findByRole("heading", { name: "Knowledge Base Management" })).toBeInTheDocument();
+  }
+
+  it("shows newly created import job as active after uploading files", async () => {
+    const user = userEvent.setup();
+
+    mockedListKnowledgeBaseJobs.mockResolvedValue({
+      active: [],
+      history: [],
+      history_total: 0,
+      history_page: 1,
+    });
+
+    const newJob = {
+      job_id: "job-1",
+      workspace_id: "ws-kb",
+      status: "queued" as const,
+      file_count: 2,
+      created_at: "2026-05-19T01:00:00Z",
+      completed_at: null,
+    };
+    mockedCreateImportJob.mockResolvedValue(newJob);
+    mockedListKnowledgeBaseJobs.mockResolvedValueOnce({
+      active: [],
+      history: [],
+      history_total: 0,
+      history_page: 1,
+    });
+    mockedListKnowledgeBaseJobs.mockResolvedValue({
+      active: [newJob],
+      history: [],
+      history_total: 0,
+      history_page: 1,
+    });
+
+    await openKnowledgeBaseManagement(user);
+
+    const fileInput = screen.getByLabelText("Select files to import");
+    const files = [
+      new File(["content a"], "doc_a.txt", { type: "text/plain" }),
+      new File(["content b"], "doc_b.txt", { type: "text/plain" }),
+    ];
+    await user.upload(fileInput, files);
+
+    await user.click(screen.getByRole("button", { name: "Import files" }));
+
+    expect(await screen.findByText(/2 files/i)).toBeInTheDocument();
+    expect(await screen.findByText(/queued/i)).toBeInTheDocument();
+  });
+
+  it("shows running job status without a cancel button", async () => {
+    const user = userEvent.setup();
+
+    mockedListKnowledgeBaseJobs.mockResolvedValue({
+      active: [
+        {
+          job_id: "job-running",
+          workspace_id: "ws-kb",
+          status: "running" as const,
+          file_count: 1,
+          created_at: "2026-05-19T01:00:00Z",
+          completed_at: null,
+        },
+      ],
+      history: [],
+      history_total: 0,
+      history_page: 1,
+    });
+
+    await openKnowledgeBaseManagement(user);
+
+    expect(await screen.findByText(/running/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /cancel/i })).not.toBeInTheDocument();
+  });
+
+  it("shows cancel button for queued job and removes it after cancel", async () => {
+    const user = userEvent.setup();
+
+    const queuedJob = {
+      job_id: "job-queued",
+      workspace_id: "ws-kb",
+      status: "queued" as const,
+      file_count: 3,
+      created_at: "2026-05-19T01:00:00Z",
+      completed_at: null,
+    };
+    mockedListKnowledgeBaseJobs.mockResolvedValueOnce({
+      active: [queuedJob],
+      history: [],
+      history_total: 0,
+      history_page: 1,
+    });
+    mockedCancelImportJob.mockResolvedValue({ ...queuedJob, status: "canceled" });
+    mockedListKnowledgeBaseJobs.mockResolvedValue({
+      active: [],
+      history: [{ ...queuedJob, status: "canceled" as const }],
+      history_total: 1,
+      history_page: 1,
+    });
+
+    await openKnowledgeBaseManagement(user);
+
+    const cancelButton = await screen.findByRole("button", { name: /cancel job/i });
+    expect(cancelButton).toBeInTheDocument();
+
+    await user.click(cancelButton);
+
+    expect(mockedCancelImportJob).toHaveBeenCalledWith("ws-kb", "job-queued");
+    await waitFor(() => expect(screen.queryByRole("button", { name: /cancel job/i })).not.toBeInTheDocument());
+  });
+
+  it("shows completed jobs in history section below active jobs", async () => {
+    const user = userEvent.setup();
+
+    mockedListKnowledgeBaseJobs.mockResolvedValue({
+      active: [
+        {
+          job_id: "job-active",
+          workspace_id: "ws-kb",
+          status: "running" as const,
+          file_count: 1,
+          created_at: "2026-05-19T02:00:00Z",
+          completed_at: null,
+        },
+      ],
+      history: [
+        {
+          job_id: "job-done",
+          workspace_id: "ws-kb",
+          status: "completed" as const,
+          file_count: 2,
+          created_at: "2026-05-19T01:00:00Z",
+          completed_at: "2026-05-19T01:30:00Z",
+        },
+      ],
+      history_total: 1,
+      history_page: 1,
+    });
+
+    await openKnowledgeBaseManagement(user);
+
+    expect(await screen.findByText(/running/i)).toBeInTheDocument();
+    expect(await screen.findByText(/completed/i)).toBeInTheDocument();
+
+    const activeSection = screen.getByRole("region", { name: /active jobs/i });
+    const historySection = screen.getByRole("region", { name: /job history/i });
+
+    // Active section should appear before history section in DOM order.
+    expect(
+      activeSection.compareDocumentPosition(historySection) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
+  });
 });
+
