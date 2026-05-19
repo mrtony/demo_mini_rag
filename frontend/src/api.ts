@@ -43,6 +43,13 @@ export async function createImportJob(workspaceId: string, files: File[]): Promi
   return expectJson<KnowledgeBaseJob>(response);
 }
 
+export async function createRebuildJob(workspaceId: string): Promise<KnowledgeBaseJob> {
+  const response = await fetch(`${API_BASE}/api/workspaces/${workspaceId}/knowledge-base/rebuild`, {
+    method: "POST",
+  });
+  return expectJson<KnowledgeBaseJob>(response);
+}
+
 export async function listKnowledgeBaseJobs(
   workspaceId: string,
   historyPage = 1,

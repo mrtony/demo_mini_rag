@@ -10,6 +10,7 @@ from backend.app import db as db_module
 from backend.app.config import get_settings
 from backend.app.main import app
 from backend.app.models import (
+    KnowledgeBaseVersion,
     ModelCatalog,
     Workspace,
     WorkspaceKnowledgeBaseSetting,
@@ -1014,6 +1015,255 @@ async def test_second_import_is_queued_when_first_job_is_running(test_client):
 
 
 @pytest.mark.asyncio
+async def test_rebuild_job_creates_new_version_and_switches_active_version_only_after_completion(test_client):
+    from backend.app.db import SessionLocal
+    from backend.app.services.kb_job_service import advance_import_queue
+
+    workspace = await create_workspace(test_client, "Workspace Rebuild")
+
+    import_resp = await test_client.post(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/import",
+        files=[("files", ("guide.txt", b"Alpha rebuild baseline", "text/plain"))],
+    )
+    assert import_resp.status_code == 202
+
+    async with SessionLocal() as session:
+        completed_job = await advance_import_queue(workspace["workspace_id"], session)
+        await session.commit()
+
+    assert completed_job is not None
+    assert completed_job.status == "completed"
+
+    settings_resp = await test_client.put(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base-settings",
+        json={
+            "chunk_size": 1000,
+            "chunk_overlap": 250,
+            "retrieval_top_k": 8,
+            "similarity_threshold": 0.2,
+            "knowledge_answering_default": False,
+        },
+    )
+    assert settings_resp.status_code == 200
+    assert settings_resp.json()["rebuild_required"] is True
+
+    rebuild_resp = await test_client.post(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/rebuild"
+    )
+    assert rebuild_resp.status_code == 202
+    rebuild_payload = rebuild_resp.json()
+    rebuild_job_id = rebuild_payload["job_id"]
+    assert rebuild_payload["status"] == "queued"
+    assert rebuild_payload["job_type"] == "rebuild"
+
+    async with SessionLocal() as session:
+        workspace_row = (
+            await session.execute(
+                select(Workspace).where(Workspace.workspace_id == workspace["workspace_id"])
+            )
+        ).scalar_one()
+        versions_before = (
+            await session.execute(
+                select(KnowledgeBaseVersion)
+                .where(KnowledgeBaseVersion.workspace_fk == workspace_row.id)
+                .order_by(KnowledgeBaseVersion.version_number.asc())
+            )
+        ).scalars().all()
+
+    assert [version.version_number for version in versions_before] == [1, 2]
+    assert workspace_row.active_knowledge_base_version_fk == versions_before[0].id
+    assert versions_before[0].status == "active"
+    assert versions_before[1].status == "pending"
+
+    search_before_completion = await test_client.post(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/search",
+        json={"query": "Alpha rebuild baseline"},
+    )
+    assert search_before_completion.status_code == 200
+    assert [result["display_filename"] for result in search_before_completion.json()["results"]] == ["guide.txt"]
+
+    async with SessionLocal() as session:
+        await advance_import_queue(workspace["workspace_id"], session)
+        await session.commit()
+
+    rebuild_history_job = None
+    for _ in range(20):
+        jobs_resp = await test_client.get(
+            f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/jobs"
+        )
+        assert jobs_resp.status_code == 200
+        rebuild_history_job = next(
+            (job for job in jobs_resp.json()["history"] if job["job_id"] == rebuild_job_id),
+            None,
+        )
+        if rebuild_history_job is not None:
+            break
+        await asyncio.sleep(0.05)
+
+    assert rebuild_history_job is not None
+    assert rebuild_history_job["status"] == "completed"
+    assert rebuild_history_job["job_type"] == "rebuild"
+
+    async with SessionLocal() as session:
+        workspace_row = (
+            await session.execute(
+                select(Workspace).where(Workspace.workspace_id == workspace["workspace_id"])
+            )
+        ).scalar_one()
+        versions_after = (
+            await session.execute(
+                select(KnowledgeBaseVersion)
+                .where(KnowledgeBaseVersion.workspace_fk == workspace_row.id)
+                .order_by(KnowledgeBaseVersion.version_number.asc())
+            )
+        ).scalars().all()
+        kb_settings = (
+            await session.execute(
+                select(WorkspaceKnowledgeBaseSetting).join(Workspace).where(
+                    Workspace.workspace_id == workspace["workspace_id"]
+                )
+            )
+        ).scalar_one()
+
+    assert workspace_row.active_knowledge_base_version_fk == versions_after[1].id
+    assert versions_after[0].status == "superseded"
+    assert versions_after[1].status == "active"
+    assert kb_settings.rebuild_required is False
+
+
+@pytest.mark.asyncio
+async def test_rebuild_is_rejected_while_import_jobs_are_queued_or_running(test_client):
+    workspace = await create_workspace(test_client, "Workspace Rebuild Blocked")
+
+    import_resp = await test_client.post(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/import",
+        files=[("files", ("guide.txt", b"Queue before rebuild", "text/plain"))],
+    )
+    assert import_resp.status_code == 202
+    job_id = import_resp.json()["job_id"]
+
+    queued_rebuild_resp = await test_client.post(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/rebuild"
+    )
+    assert queued_rebuild_resp.status_code == 409
+    assert "queued or running import jobs" in queued_rebuild_resp.json()["detail"]
+
+    advance_resp = await test_client.post(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/jobs/{job_id}/advance-to-running",
+    )
+    assert advance_resp.status_code == 200
+
+    running_rebuild_resp = await test_client.post(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/rebuild"
+    )
+    assert running_rebuild_resp.status_code == 409
+    assert "queued or running import jobs" in running_rebuild_resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_rebuild_uses_only_current_retrievable_revisions_of_non_deleted_documents(test_client):
+    from backend.app.db import SessionLocal
+    from backend.app.services.kb_job_service import advance_import_queue
+
+    workspace = await create_workspace(test_client, "Workspace Rebuild Scope")
+
+    initial_import = await test_client.post(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/import",
+        files=[("files", ("guide.txt", b"Alpha historical revision", "text/plain"))],
+    )
+    assert initial_import.status_code == 202
+
+    async with SessionLocal() as session:
+        await advance_import_queue(workspace["workspace_id"], session)
+        await session.commit()
+
+    replacement_import = await test_client.post(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/import",
+        files=[("files", ("guide.txt", b"Beta active revision", "text/plain"))],
+    )
+    assert replacement_import.status_code == 202
+
+    async with SessionLocal() as session:
+        await advance_import_queue(workspace["workspace_id"], session)
+        await session.commit()
+
+    extra_import = await test_client.post(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/import",
+        files=[("files", ("ops.txt", b"Gamma deleted document", "text/plain"))],
+    )
+    assert extra_import.status_code == 202
+
+    async with SessionLocal() as session:
+        await advance_import_queue(workspace["workspace_id"], session)
+        await session.commit()
+
+    documents_resp = await test_client.get(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/documents"
+    )
+    assert documents_resp.status_code == 200
+    documents = documents_resp.json()["documents"]
+    ops_document_id = next(
+        document["knowledge_document_id"]
+        for document in documents
+        if document["display_filename"] == "ops.txt"
+    )
+
+    delete_resp = await test_client.delete(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/documents/{ops_document_id}"
+    )
+    assert delete_resp.status_code == 204
+
+    settings_resp = await test_client.put(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base-settings",
+        json={
+            "chunk_size": 960,
+            "chunk_overlap": 120,
+            "retrieval_top_k": 8,
+            "similarity_threshold": 0.2,
+            "knowledge_answering_default": False,
+        },
+    )
+    assert settings_resp.status_code == 200
+    assert settings_resp.json()["rebuild_required"] is True
+
+    rebuild_resp = await test_client.post(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/rebuild"
+    )
+    assert rebuild_resp.status_code == 202
+
+    async with SessionLocal() as session:
+        rebuild_job = await advance_import_queue(workspace["workspace_id"], session)
+        await session.commit()
+
+    assert rebuild_job is not None
+    assert rebuild_job.status == "completed"
+    assert rebuild_job.job_type == "rebuild"
+
+    beta_search_resp = await test_client.post(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/search",
+        json={"query": "Beta active revision"},
+    )
+    assert beta_search_resp.status_code == 200
+    assert [result["display_filename"] for result in beta_search_resp.json()["results"]] == ["guide.txt"]
+
+    alpha_search_resp = await test_client.post(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/search",
+        json={"query": "Alpha historical revision"},
+    )
+    assert alpha_search_resp.status_code == 200
+    alpha_results = alpha_search_resp.json()["results"]
+    assert all("Alpha historical revision" not in result["excerpt"] for result in alpha_results)
+    assert any("Beta active revision" in result["excerpt"] for result in alpha_results)
+
+    deleted_search_resp = await test_client.post(
+        f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/search",
+        json={"query": "Gamma deleted document"},
+    )
+    assert deleted_search_resp.status_code == 200
+    assert all(result["display_filename"] != "ops.txt" for result in deleted_search_resp.json()["results"])
+
+
+@pytest.mark.asyncio
 async def test_cancel_queued_import_job_transitions_to_canceled(test_client):
     workspace = await create_workspace(test_client, "Workspace Cancel")
 
@@ -1255,13 +1505,28 @@ async def test_import_dedupes_same_content_and_replaces_revision_for_same_filena
         files=[("files", ("guide.txt", b"Beta release notes", "text/plain"))],
     )
     assert replacement_import.status_code == 202
+    replacement_job_id = replacement_import.json()["job_id"]
 
     async with SessionLocal() as session:
-        replacement_job = await advance_import_queue(workspace["workspace_id"], session)
+        await advance_import_queue(workspace["workspace_id"], session)
         await session.commit()
 
-    assert replacement_job is not None
-    assert replacement_job.items[0].outcome == "replaced"
+    replacement_history_job = None
+    for _ in range(20):
+        jobs_resp = await test_client.get(
+            f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/jobs"
+        )
+        assert jobs_resp.status_code == 200
+        replacement_history_job = next(
+            (job for job in jobs_resp.json()["history"] if job["job_id"] == replacement_job_id),
+            None,
+        )
+        if replacement_history_job is not None:
+            break
+        await asyncio.sleep(0.05)
+
+    assert replacement_history_job is not None
+    assert replacement_history_job["items"][0]["outcome"] == "replaced"
 
     documents_resp = await test_client.get(
         f"/api/workspaces/{workspace['workspace_id']}/knowledge-base/documents"

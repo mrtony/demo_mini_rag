@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from ..config import DATA_DIR, get_settings
-from ..models import KnowledgeDocument, KnowledgeDocumentRevision, Workspace
+from ..models import KnowledgeBaseVersion, KnowledgeDocument, KnowledgeDocumentRevision, Workspace
 
 
 SUPPORTED_EXTENSIONS = {".txt", ".md", ".markdown", ".pdf"}
@@ -43,7 +43,7 @@ class KnowledgeBaseIngestionBackend(Protocol):
     def ingest_revision(
         self,
         *,
-        workspace_id: str,
+        collection_name: str,
         knowledge_document_id: str,
         revision_number: int,
         display_filename: str,
@@ -56,7 +56,7 @@ class KnowledgeBaseIngestionBackend(Protocol):
     def delete_revision(
         self,
         *,
-        workspace_id: str,
+        collection_name: str,
         knowledge_document_id: str,
         revision_number: int,
     ) -> None: ...
@@ -64,7 +64,7 @@ class KnowledgeBaseIngestionBackend(Protocol):
     def search(
         self,
         *,
-        workspace_id: str,
+        collection_name: str,
         query: str,
         top_k: int,
         similarity_threshold: float,
@@ -119,7 +119,7 @@ class LlamaIndexQdrantKnowledgeBaseBackend:
     def ingest_revision(
         self,
         *,
-        workspace_id: str,
+        collection_name: str,
         knowledge_document_id: str,
         revision_number: int,
         display_filename: str,
@@ -158,27 +158,26 @@ class LlamaIndexQdrantKnowledgeBaseBackend:
             if locator_summary:
                 node.metadata["locator_summary"] = locator_summary
 
-        self._vector_store(workspace_id).add(nodes)
+        self._vector_store(collection_name).add(nodes)
         return chunk_count
 
     def delete_revision(
         self,
         *,
-        workspace_id: str,
+        collection_name: str,
         knowledge_document_id: str,
         revision_number: int,
     ) -> None:
-        collection_name = self._collection_name(workspace_id)
         if not self._qdrant_client.collection_exists(collection_name):
             return
-        self._vector_store(workspace_id).delete(
+        self._vector_store(collection_name).delete(
             build_revision_ref_doc_id(knowledge_document_id, revision_number)
         )
 
     def search(
         self,
         *,
-        workspace_id: str,
+        collection_name: str,
         query: str,
         top_k: int,
         similarity_threshold: float,
@@ -187,11 +186,10 @@ class LlamaIndexQdrantKnowledgeBaseBackend:
         if not normalized_query:
             return []
 
-        collection_name = self._collection_name(workspace_id)
         if not self._qdrant_client.collection_exists(collection_name):
             return []
 
-        vector_store = self._vector_store(workspace_id)
+        vector_store = self._vector_store(collection_name)
         index = self._VectorStoreIndex.from_vector_store(
             vector_store=vector_store,
             embed_model=self._embed_model,
@@ -222,15 +220,11 @@ class LlamaIndexQdrantKnowledgeBaseBackend:
 
         return sorted(best_results_by_document.values(), key=lambda entry: entry.score, reverse=True)
 
-    def _vector_store(self, workspace_id: str):
+    def _vector_store(self, collection_name: str):
         return self._QdrantVectorStore(
             client=self._qdrant_client,
-            collection_name=self._collection_name(workspace_id),
+            collection_name=collection_name,
         )
-
-    @staticmethod
-    def _collection_name(workspace_id: str) -> str:
-        return f"workspace_kb_{workspace_id.replace('-', '_')}"
 
 
 def utc_now() -> datetime:
@@ -295,7 +289,7 @@ def normalize_native_file(native_file_path: str, filename: str) -> NormalizedMar
 
 def ingest_document_revision(
     *,
-    workspace_id: str,
+    collection_name: str,
     knowledge_document_id: str,
     revision_number: int,
     display_filename: str,
@@ -305,7 +299,7 @@ def ingest_document_revision(
     chunk_overlap: int,
 ) -> int:
     return get_knowledge_base_backend().ingest_revision(
-        workspace_id=workspace_id,
+        collection_name=collection_name,
         knowledge_document_id=knowledge_document_id,
         revision_number=revision_number,
         display_filename=display_filename,
@@ -318,15 +312,89 @@ def ingest_document_revision(
 
 def delete_document_revision_from_index(
     *,
-    workspace_id: str,
+    collection_name: str,
     knowledge_document_id: str,
     revision_number: int,
 ) -> None:
     get_knowledge_base_backend().delete_revision(
-        workspace_id=workspace_id,
+        collection_name=collection_name,
         knowledge_document_id=knowledge_document_id,
         revision_number=revision_number,
     )
+
+
+def build_version_collection_name(workspace_id: str, version_id: str) -> str:
+    normalized_workspace_id = workspace_id.replace("-", "_")
+    normalized_version_id = version_id.replace("-", "_")
+    return f"workspace_kb_{normalized_workspace_id}_v_{normalized_version_id}"
+
+
+async def get_next_version_number(
+    workspace_fk: int,
+    session: AsyncSession,
+) -> int:
+    result = await session.execute(
+        select(func.max(KnowledgeBaseVersion.version_number)).where(
+            KnowledgeBaseVersion.workspace_fk == workspace_fk
+        )
+    )
+    current_max = result.scalar_one()
+    return 1 if current_max is None else current_max + 1
+
+
+async def create_knowledge_base_version(
+    workspace: Workspace,
+    *,
+    version_number: int,
+    status: str,
+    session: AsyncSession,
+) -> KnowledgeBaseVersion:
+    version_id = str(uuid4())
+    version = KnowledgeBaseVersion(
+        workspace_fk=workspace.id,
+        version_id=version_id,
+        version_number=version_number,
+        status=status,
+        collection_name=build_version_collection_name(workspace.workspace_id, version_id),
+    )
+    session.add(version)
+    await session.flush()
+    return version
+
+
+async def ensure_active_knowledge_base_version(
+    workspace: Workspace,
+    session: AsyncSession,
+) -> KnowledgeBaseVersion:
+    if workspace.active_knowledge_base_version is not None:
+        return workspace.active_knowledge_base_version
+
+    version = await create_knowledge_base_version(
+        workspace,
+        version_number=await get_next_version_number(workspace.id, session),
+        status="active",
+        session=session,
+    )
+    version.activated_at = utc_now()
+    workspace.active_knowledge_base_version_fk = version.id
+    await session.flush()
+    return version
+
+
+async def activate_knowledge_base_version(
+    workspace: Workspace,
+    version: KnowledgeBaseVersion,
+    session: AsyncSession,
+) -> None:
+    current_active = workspace.active_knowledge_base_version
+    if current_active is not None and current_active.id != version.id:
+        current_active.status = "superseded"
+        current_active.superseded_at = utc_now()
+
+    version.status = "active"
+    version.activated_at = utc_now()
+    workspace.active_knowledge_base_version_fk = version.id
+    await session.flush()
 
 
 async def get_workspace_document_by_filename(
@@ -466,17 +534,24 @@ async def search_workspace_documents(
     workspace_result = await session.execute(
         select(Workspace)
         .where(Workspace.workspace_id == workspace_id)
-        .options(selectinload(Workspace.knowledge_base_setting))
+        .options(
+            selectinload(Workspace.knowledge_base_setting),
+            selectinload(Workspace.active_knowledge_base_version),
+        )
     )
     workspace = workspace_result.scalar_one_or_none()
     if workspace is None:
+        return []
+
+    active_version = workspace.active_knowledge_base_version
+    if active_version is None:
         return []
 
     settings = workspace.knowledge_base_setting
     top_k = settings.retrieval_top_k if settings is not None else 8
     similarity_threshold = settings.similarity_threshold if settings is not None else 0.2
     return get_knowledge_base_backend().search(
-        workspace_id=workspace.workspace_id,
+        collection_name=active_version.collection_name,
         query=query,
         top_k=top_k,
         similarity_threshold=similarity_threshold,

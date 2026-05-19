@@ -40,6 +40,11 @@ class Workspace(Base):
     name: Mapped[str] = mapped_column(String(120))
     system_message: Mapped[str] = mapped_column(Text)
     selected_model_fk: Mapped[int] = mapped_column(ForeignKey("model_catalog.id"), index=True)
+    active_knowledge_base_version_fk: Mapped[int | None] = mapped_column(
+        ForeignKey("knowledge_base_versions.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
     is_archived: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(
@@ -78,6 +83,18 @@ class Workspace(Base):
     knowledge_documents: Mapped[list["KnowledgeDocument"]] = relationship(
         back_populates="workspace",
         cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+    knowledge_base_versions: Mapped[list["KnowledgeBaseVersion"]] = relationship(
+        back_populates="workspace",
+        cascade="all, delete-orphan",
+        foreign_keys="KnowledgeBaseVersion.workspace_fk",
+        order_by="KnowledgeBaseVersion.version_number",
+        lazy="selectin",
+    )
+    active_knowledge_base_version: Mapped["KnowledgeBaseVersion | None"] = relationship(
+        foreign_keys=[active_knowledge_base_version_fk],
+        post_update=True,
         lazy="selectin",
     )
 
@@ -142,6 +159,12 @@ class KnowledgeBaseJob(Base):
         ForeignKey("workspaces.id", ondelete="CASCADE"),
         index=True,
     )
+    job_type: Mapped[str] = mapped_column(String(20), default="import")
+    target_version_fk: Mapped[int | None] = mapped_column(
+        ForeignKey("knowledge_base_versions.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     status: Mapped[str] = mapped_column(String(20), default="queued")
     file_count: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(
@@ -153,10 +176,46 @@ class KnowledgeBaseJob(Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     workspace: Mapped["Workspace"] = relationship(back_populates="knowledge_base_jobs", lazy="selectin")
+    target_version: Mapped["KnowledgeBaseVersion | None"] = relationship(
+        back_populates="jobs",
+        foreign_keys=[target_version_fk],
+        lazy="selectin",
+    )
     items: Mapped[list["KnowledgeBaseJobItem"]] = relationship(
         back_populates="job",
         cascade="all, delete-orphan",
         order_by="KnowledgeBaseJobItem.id",
+        lazy="selectin",
+    )
+
+
+class KnowledgeBaseVersion(Base):
+    __tablename__ = "knowledge_base_versions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    workspace_fk: Mapped[int] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        index=True,
+    )
+    version_id: Mapped[str] = mapped_column(String(36), unique=True, index=True)
+    version_number: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    collection_name: Mapped[str] = mapped_column(String(255), unique=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    workspace: Mapped["Workspace"] = relationship(
+        back_populates="knowledge_base_versions",
+        foreign_keys=[workspace_fk],
+        lazy="selectin",
+    )
+    jobs: Mapped[list["KnowledgeBaseJob"]] = relationship(
+        back_populates="target_version",
+        foreign_keys="KnowledgeBaseJob.target_version_fk",
         lazy="selectin",
     )
 

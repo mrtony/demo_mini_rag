@@ -6,6 +6,7 @@ import {
   archiveWorkspace,
   cancelImportJob,
   createImportJob,
+  createRebuildJob,
   createWorkspace,
   deleteKnowledgeBaseDocument,
   deleteConversation,
@@ -31,6 +32,7 @@ vi.mock("./api", () => ({
   archiveWorkspace: vi.fn(),
   cancelImportJob: vi.fn(),
   createImportJob: vi.fn(),
+  createRebuildJob: vi.fn(),
   createWorkspace: vi.fn(),
   deleteKnowledgeBaseDocument: vi.fn(),
   deleteConversation: vi.fn(),
@@ -75,6 +77,7 @@ vi.mock("./lib/sse", () => ({
 
 const mockedCancelImportJob = vi.mocked(cancelImportJob);
 const mockedCreateImportJob = vi.mocked(createImportJob);
+const mockedCreateRebuildJob = vi.mocked(createRebuildJob);
 const mockedCreateWorkspace = vi.mocked(createWorkspace);
 const mockedDeleteKnowledgeBaseDocument = vi.mocked(deleteKnowledgeBaseDocument);
 const mockedDeleteConversation = vi.mocked(deleteConversation);
@@ -101,6 +104,7 @@ describe("App", () => {
     mockedArchiveWorkspace.mockReset();
     mockedCancelImportJob.mockReset();
     mockedCreateImportJob.mockReset();
+    mockedCreateRebuildJob.mockReset();
     mockedCreateWorkspace.mockReset();
     mockedDeleteKnowledgeBaseDocument.mockReset();
     mockedDeleteConversation.mockReset();
@@ -1361,7 +1365,18 @@ describe("App", () => {
     };
   }
 
-  async function openKnowledgeBaseManagement(user: ReturnType<typeof userEvent.setup>) {
+  async function openKnowledgeBaseManagement(
+    user: ReturnType<typeof userEvent.setup>,
+    knowledgeBaseSettingsOverride?: Partial<{
+      workspace_id: string;
+      chunk_size: number;
+      chunk_overlap: number;
+      retrieval_top_k: number;
+      similarity_threshold: number;
+      knowledge_answering_default: boolean;
+      rebuild_required: boolean;
+    }>,
+  ) {
     mockedListWorkspaces.mockResolvedValue([makeKbWorkspace()]);
     mockedListWorkspaceConversations.mockResolvedValue([]);
     mockedGetKnowledgeBaseSettings.mockResolvedValue({
@@ -1372,6 +1387,7 @@ describe("App", () => {
       similarity_threshold: 0.2,
       knowledge_answering_default: false,
       rebuild_required: false,
+      ...knowledgeBaseSettingsOverride,
     });
 
     render(<App />);
@@ -1381,6 +1397,47 @@ describe("App", () => {
     await user.click(await screen.findByRole("button", { name: "Open Knowledge Base Management" }));
     expect(await screen.findByRole("heading", { name: "Knowledge Base Management" })).toBeInTheDocument();
   }
+
+  it("shows rebuild required prompt in management and lets the user start a rebuild", async () => {
+    const user = userEvent.setup();
+
+    mockedCreateRebuildJob.mockResolvedValue({
+      job_id: "job-rebuild",
+      workspace_id: "ws-kb",
+      job_type: "rebuild",
+      status: "queued",
+      file_count: 1,
+      created_at: "2026-05-19T02:00:00Z",
+      completed_at: null,
+    });
+    mockedListKnowledgeBaseJobs.mockResolvedValue({
+      active: [
+        {
+          job_id: "job-rebuild",
+          workspace_id: "ws-kb",
+          job_type: "rebuild",
+          status: "queued" as const,
+          file_count: 1,
+          created_at: "2026-05-19T02:00:00Z",
+          completed_at: null,
+        },
+      ],
+      history: [],
+      history_total: 0,
+      history_page: 1,
+    });
+
+    await openKnowledgeBaseManagement(user, {
+      chunk_size: 1000,
+      rebuild_required: true,
+    });
+
+    expect(await screen.findByText("Rebuild Required")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Rebuild Knowledge Base" }));
+
+    expect(mockedCreateRebuildJob).toHaveBeenCalledWith("ws-kb");
+    expect(await screen.findByText(/knowledge base rebuild - queued/i)).toBeInTheDocument();
+  });
 
   it("shows newly created import job as active after uploading files", async () => {
     const user = userEvent.setup();

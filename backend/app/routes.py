@@ -57,7 +57,14 @@ from .services.kb_document_service import (
     persist_upload_bytes,
     search_workspace_documents,
 )
-from .services.kb_job_service import advance_import_queue, has_running_job, schedule_import_queue_processing
+from .services.kb_job_service import (
+    advance_import_queue,
+    create_rebuild_job,
+    has_active_import_jobs,
+    has_active_rebuild_job,
+    has_running_job,
+    schedule_import_queue_processing,
+)
 from .sse import format_sse_event, iter_sse
 
 
@@ -172,6 +179,7 @@ def _serialize_kb_job(job: KnowledgeBaseJob) -> KnowledgeBaseJobSummary:
     return KnowledgeBaseJobSummary(
         job_id=job.job_id,
         workspace_id=job.workspace.workspace_id,
+        job_type=job.job_type,
         status=job.status,
         file_count=job.file_count,
         created_at=job.created_at,
@@ -248,6 +256,7 @@ async def _load_workspace_by_public_id_or_404(
             selectinload(Workspace.selected_model),
             selectinload(Workspace.model_settings),
             selectinload(Workspace.knowledge_base_setting),
+            selectinload(Workspace.active_knowledge_base_version),
         )
         .execution_options(populate_existing=True)
         .where(*conditions)
@@ -1084,6 +1093,35 @@ async def create_knowledge_base_import_job(
     return _serialize_kb_job(job)
 
 
+@router.post(
+    "/workspaces/{workspace_id}/knowledge-base/rebuild",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=KnowledgeBaseJobSummary,
+)
+async def create_knowledge_base_rebuild_job(
+    workspace_id: str,
+    session: AsyncSession = Depends(get_db_session),
+) -> KnowledgeBaseJobSummary:
+    workspace = await _load_workspace_or_404(session, workspace_id)
+
+    if await has_active_import_jobs(workspace.id, session):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Knowledge Base Rebuild cannot start while there are queued or running import jobs",
+        )
+    if await has_active_rebuild_job(workspace.id, session):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Knowledge Base Rebuild is already queued or running",
+        )
+
+    job = await create_rebuild_job(workspace, session)
+    await session.commit()
+    await session.refresh(job)
+    schedule_import_queue_processing(workspace.workspace_id)
+    return _serialize_kb_job(job)
+
+
 @router.get(
     "/workspaces/{workspace_id}/knowledge-base/jobs",
     response_model=KnowledgeBaseJobListResponse,
@@ -1211,9 +1249,9 @@ async def delete_knowledge_base_document(
     if document is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Knowledge document not found")
 
-    if document.current_revision is not None:
+    if document.current_revision is not None and workspace.active_knowledge_base_version is not None:
         delete_document_revision_from_index(
-            workspace_id=workspace.workspace_id,
+            collection_name=workspace.active_knowledge_base_version.collection_name,
             knowledge_document_id=document.knowledge_document_id,
             revision_number=document.current_revision.revision_number,
         )

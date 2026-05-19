@@ -59,6 +59,7 @@ export type KnowledgeBaseJobItem = {
 export type KnowledgeBaseJob = {
   job_id: string;
   workspace_id: string;
+  job_type?: "import" | "rebuild";
   status: "queued" | "running" | "completed" | "failed" | "canceled";
   file_count: number;
   created_at: string;

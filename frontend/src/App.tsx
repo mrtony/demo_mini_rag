@@ -6,6 +6,7 @@ import {
   archiveWorkspace,
   cancelImportJob,
   createImportJob,
+  createRebuildJob,
   createWorkspace,
   deleteKnowledgeBaseDocument,
   deleteConversation,
@@ -279,6 +280,13 @@ function hasKnowledgeBaseValidationErrors(errors: KnowledgeBaseSettingsValidatio
 
 function cn(...values: Array<string | false | null | undefined>): string {
   return values.filter(Boolean).join(" ");
+}
+
+function formatKnowledgeBaseJobSummary(job: KnowledgeBaseJob): string {
+  if (job.job_type === "rebuild") {
+    return `Knowledge Base rebuild - ${job.status}`;
+  }
+  return `${job.file_count} file${job.file_count !== 1 ? "s" : ""} - ${job.status}`;
 }
 
 
@@ -1013,7 +1021,6 @@ export default function App() {
     setIsSettingsOpen(false);
     setIsKnowledgeBaseManagementOpen(true);
     setSettingsDraft(null);
-    setKnowledgeBaseSettingsDraft(null);
     setActiveSettingsTab("knowledgeBase");
     void loadKbJobs(activeWorkspace.workspace_id);
     void loadKnowledgeDocuments(activeWorkspace.workspace_id);
@@ -1076,6 +1083,18 @@ export default function App() {
       await loadKbJobs(activeWorkspace.workspace_id);
     } catch {
       // Ignore delete errors.
+    }
+  }
+
+  async function handleRebuildKnowledgeBase() {
+    if (!activeWorkspace) return;
+    setErrorMessage(null);
+    try {
+      await createRebuildJob(activeWorkspace.workspace_id);
+      await loadKbJobs(activeWorkspace.workspace_id);
+      await loadKnowledgeBaseSettings(activeWorkspace.workspace_id);
+    } catch (error) {
+      setErrorMessage(getErrorMessage(error));
     }
   }
 
@@ -1155,10 +1174,13 @@ export default function App() {
           selected_model_id: settingsDraft.selectedModelId,
           model_settings: normalizeModelSettings(settingsDraft.modelSettings),
         });
-        setWorkspaces((current) =>
-          current.map((item) => (item.workspace_id === updatedWorkspace.workspace_id ? updatedWorkspace : item)),
-        );
-        setSettingsDraft(createSettingsDraft(updatedWorkspace));
+        const savedWorkspace = updatedWorkspace;
+        if (savedWorkspace !== null) {
+          setWorkspaces((current) =>
+            current.map((item) => (item.workspace_id === savedWorkspace.workspace_id ? savedWorkspace : item)),
+          );
+          setSettingsDraft(createSettingsDraft(savedWorkspace));
+        }
       }
 
       if (hasPendingKnowledgeBaseSettings && knowledgeBaseSettingsDraft !== null) {
@@ -1533,6 +1555,25 @@ export default function App() {
                       </div>
                     </div>
 
+                    {knowledgeBaseSettingsDraft?.rebuildRequired ? (
+                      <div className="rounded-[1.5rem] border border-amber-200 bg-amber-50 px-5 py-5 text-sm text-amber-900">
+                        <div className="font-semibold">Rebuild Required</div>
+                        <div className="mt-1">
+                          Chunking settings changed. Current retrieval keeps using the active version until the rebuild
+                          completes.
+                        </div>
+                        <button
+                          type="button"
+                          className="mt-4 rounded-xl bg-stone-950 px-4 py-2 text-sm font-medium text-white hover:bg-rose-500"
+                          onClick={() => {
+                            void handleRebuildKnowledgeBase();
+                          }}
+                        >
+                          Rebuild Knowledge Base
+                        </button>
+                      </div>
+                    ) : null}
+
                     {/* Upload section */}
                     <div className="rounded-[1.75rem] border border-stone-200 bg-stone-50/80 px-6 py-6 flex flex-col gap-4">
                       <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-stone-500">
@@ -1632,7 +1673,7 @@ export default function App() {
                               className="flex items-center justify-between rounded-xl border border-stone-200 bg-white px-4 py-3"
                             >
                               <span className="text-sm text-stone-700">
-                                {job.file_count} file{job.file_count !== 1 ? "s" : ""} &mdash; {job.status}
+                                {formatKnowledgeBaseJobSummary(job)}
                               </span>
                               {job.status === "queued" && (
                                 <button
@@ -1666,7 +1707,7 @@ export default function App() {
                             >
                               <div className="flex items-center justify-between gap-3">
                                 <span className="text-sm text-stone-700">
-                                  {job.file_count} file{job.file_count !== 1 ? "s" : ""} &mdash; {job.status}
+                                  {formatKnowledgeBaseJobSummary(job)}
                                 </span>
                               </div>
                               {job.items && job.items.length > 0 ? (

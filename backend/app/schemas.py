@@ -110,6 +110,7 @@ class KnowledgeBaseJobItemSummary(BaseModel):
 class KnowledgeBaseJobSummary(BaseModel):
     job_id: str
     workspace_id: str
+    job_type: str
     status: str
     file_count: int
     created_at: datetime
