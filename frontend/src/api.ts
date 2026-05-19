@@ -3,6 +3,10 @@ import type {
   ChatStreamRequest,
   ConversationDetail,
   ConversationSummary,
+  KnowledgeBaseJob,
+  KnowledgeBaseJobList,
+  KnowledgeDocumentList,
+  KnowledgeBaseSettings,
   ModelCatalogEntry,
   ModelCatalogSummary,
   StoredMessage,
@@ -25,6 +29,58 @@ async function expectJson<T>(response: Response): Promise<T> {
     throw new Error(message);
   }
   return (await response.json()) as T;
+}
+
+export async function createImportJob(workspaceId: string, files: File[]): Promise<KnowledgeBaseJob> {
+  const formData = new FormData();
+  for (const file of files) {
+    formData.append("files", file);
+  }
+  const response = await fetch(`${API_BASE}/api/workspaces/${workspaceId}/knowledge-base/import`, {
+    method: "POST",
+    body: formData,
+  });
+  return expectJson<KnowledgeBaseJob>(response);
+}
+
+export async function createRebuildJob(workspaceId: string): Promise<KnowledgeBaseJob> {
+  const response = await fetch(`${API_BASE}/api/workspaces/${workspaceId}/knowledge-base/rebuild`, {
+    method: "POST",
+  });
+  return expectJson<KnowledgeBaseJob>(response);
+}
+
+export async function listKnowledgeBaseJobs(
+  workspaceId: string,
+  historyPage = 1,
+): Promise<KnowledgeBaseJobList> {
+  const response = await fetch(
+    `${API_BASE}/api/workspaces/${workspaceId}/knowledge-base/jobs?history_page=${historyPage}`,
+  );
+  return expectJson<KnowledgeBaseJobList>(response);
+}
+
+export async function cancelImportJob(workspaceId: string, jobId: string): Promise<KnowledgeBaseJob> {
+  const response = await fetch(
+    `${API_BASE}/api/workspaces/${workspaceId}/knowledge-base/jobs/${jobId}/cancel`,
+    { method: "POST" },
+  );
+  return expectJson<KnowledgeBaseJob>(response);
+}
+
+export async function listKnowledgeBaseDocuments(workspaceId: string): Promise<KnowledgeDocumentList> {
+  const response = await fetch(`${API_BASE}/api/workspaces/${workspaceId}/knowledge-base/documents`);
+  return expectJson<KnowledgeDocumentList>(response);
+}
+
+export async function deleteKnowledgeBaseDocument(workspaceId: string, knowledgeDocumentId: string): Promise<void> {
+  const response = await fetch(
+    `${API_BASE}/api/workspaces/${workspaceId}/knowledge-base/documents/${knowledgeDocumentId}`,
+    { method: "DELETE" },
+  );
+  if (!response.ok) {
+    await expectJson<Record<string, never>>(response);
+  }
 }
 
 export async function listWorkspaces(): Promise<WorkspaceSummary[]> {
@@ -65,6 +121,31 @@ export async function updateWorkspace(
     body: JSON.stringify(payload),
   });
   return expectJson<WorkspaceSummary>(response);
+}
+
+export async function getKnowledgeBaseSettings(workspaceId: string): Promise<KnowledgeBaseSettings> {
+  const response = await fetch(`${API_BASE}/api/workspaces/${workspaceId}/knowledge-base-settings`);
+  return expectJson<KnowledgeBaseSettings>(response);
+}
+
+export async function updateKnowledgeBaseSettings(
+  workspaceId: string,
+  payload: {
+    chunk_size: number;
+    chunk_overlap: number;
+    retrieval_top_k: number;
+    similarity_threshold: number;
+    knowledge_answering_default: boolean;
+  },
+): Promise<KnowledgeBaseSettings> {
+  const response = await fetch(`${API_BASE}/api/workspaces/${workspaceId}/knowledge-base-settings`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+  return expectJson<KnowledgeBaseSettings>(response);
 }
 
 export async function reorderWorkspaces(workspaceIds: string[]): Promise<WorkspaceSummary[]> {
@@ -179,6 +260,10 @@ export function toChatBubbles(messages: StoredMessage[]): ChatBubble[] {
       content: message.response,
       status: normalizeStatus(message.status),
       messageId: message.id,
+      knowledgeAnsweringRequested: message.knowledge_answering_requested ?? false,
+      knowledgeAnsweringUsed: message.knowledge_answering_used ?? false,
+      fallbackReason: message.fallback_reason ?? null,
+      sources: message.sources ?? [],
     },
   ]);
 }

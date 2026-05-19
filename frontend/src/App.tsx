@@ -4,11 +4,18 @@ import { useEffect, useRef, useState } from "react";
 import "./App.css";
 import {
   archiveWorkspace,
+  cancelImportJob,
+  createImportJob,
+  createRebuildJob,
   createWorkspace,
+  deleteKnowledgeBaseDocument,
   deleteConversation,
   getDefaultWorkspaceModel,
+  getKnowledgeBaseSettings,
   getConversation,
+  listKnowledgeBaseDocuments,
   listArchivedWorkspaces,
+  listKnowledgeBaseJobs,
   listModels,
   listWorkspaceConversations,
   listWorkspaces,
@@ -17,6 +24,7 @@ import {
   restoreWorkspace,
   stopConversation,
   toChatBubbles,
+  updateKnowledgeBaseSettings,
   updateWorkspace,
 } from "./api";
 import {
@@ -32,10 +40,16 @@ import { readSseStream } from "./lib/sse";
 import type {
   ChatBubble,
   ConversationSummary,
+  KnowledgeBaseJob,
+  KnowledgeBaseJobList,
+  KnowledgeDocument,
+  KnowledgeDocumentList,
+  KnowledgeBaseSettings,
   ModelCatalogEntry,
   ModelSettingSchema,
   ModelCatalogSummary,
   ParsedSseEvent,
+  SourceCitation,
   WorkspaceSummary,
 } from "./types";
 
@@ -50,11 +64,28 @@ type WorkspaceSettingsDraft = {
   modelSettings: Record<string, string | number>;
 };
 
+type KnowledgeBaseSettingsDraft = {
+  workspaceId: string;
+  chunkSize: number;
+  chunkOverlap: number;
+  retrievalTopK: number;
+  similarityThreshold: number;
+  knowledgeAnsweringDefault: boolean;
+  rebuildRequired: boolean;
+};
+
 type SettingsValidationErrors = {
   name?: string;
   systemMessage?: string;
   selectedModelId?: string;
   modelSettings: Record<string, string>;
+};
+
+type KnowledgeBaseSettingsValidationErrors = {
+  chunkSize?: string;
+  chunkOverlap?: string;
+  retrievalTopK?: string;
+  similarityThreshold?: string;
 };
 
 type ConversationMessagesById = Record<string, ChatBubble[]>;
@@ -107,6 +138,20 @@ function createSettingsDraft(workspace: WorkspaceSummary): WorkspaceSettingsDraf
     systemMessage: workspace.system_message,
     selectedModelId: workspace.selected_model.model_id,
     modelSettings: { ...(workspace.model_settings ?? {}) },
+  };
+}
+
+function createKnowledgeBaseSettingsDraft(
+  knowledgeBaseSettings: KnowledgeBaseSettings,
+): KnowledgeBaseSettingsDraft {
+  return {
+    workspaceId: knowledgeBaseSettings.workspace_id,
+    chunkSize: knowledgeBaseSettings.chunk_size,
+    chunkOverlap: knowledgeBaseSettings.chunk_overlap,
+    retrievalTopK: knowledgeBaseSettings.retrieval_top_k,
+    similarityThreshold: knowledgeBaseSettings.similarity_threshold,
+    knowledgeAnsweringDefault: knowledgeBaseSettings.knowledge_answering_default,
+    rebuildRequired: knowledgeBaseSettings.rebuild_required,
   };
 }
 
@@ -205,14 +250,81 @@ function hasValidationErrors(errors: SettingsValidationErrors): boolean {
   );
 }
 
+function getKnowledgeBaseSettingsValidationErrors(
+  draft: KnowledgeBaseSettingsDraft | null,
+): KnowledgeBaseSettingsValidationErrors {
+  if (draft === null) {
+    return {};
+  }
+
+  const errors: KnowledgeBaseSettingsValidationErrors = {};
+  if (!Number.isInteger(draft.chunkSize) || draft.chunkSize < 1) {
+    errors.chunkSize = "Chunk Size must be at least 1";
+  }
+  if (!Number.isInteger(draft.chunkOverlap) || draft.chunkOverlap < 0) {
+    errors.chunkOverlap = "Chunk Overlap cannot be negative";
+  } else if (draft.chunkOverlap >= draft.chunkSize) {
+    errors.chunkOverlap = "Chunk Overlap must be smaller than Chunk Size";
+  }
+  if (!Number.isInteger(draft.retrievalTopK) || draft.retrievalTopK < 1) {
+    errors.retrievalTopK = "Top K must be at least 1";
+  }
+  if (Number.isNaN(draft.similarityThreshold) || draft.similarityThreshold < 0 || draft.similarityThreshold > 1) {
+    errors.similarityThreshold = "Similarity Threshold must be between 0 and 1";
+  }
+  return errors;
+}
+
+function hasKnowledgeBaseValidationErrors(errors: KnowledgeBaseSettingsValidationErrors): boolean {
+  return Object.values(errors).some(Boolean);
+}
+
 function cn(...values: Array<string | false | null | undefined>): string {
   return values.filter(Boolean).join(" ");
+}
+
+function formatKnowledgeBaseJobSummary(job: KnowledgeBaseJob): string {
+  if (job.job_type === "rebuild") {
+    return `Knowledge Base rebuild - ${job.status}`;
+  }
+  return `${job.file_count} file${job.file_count !== 1 ? "s" : ""} - ${job.status}`;
+}
+
+function normalizeSourceCitations(rawSources: unknown[]): SourceCitation[] {
+  return rawSources.map((source) => {
+    const citation = source as Record<string, unknown>;
+    return {
+      knowledge_document_id: String(citation.knowledge_document_id ?? ""),
+      display_filename: String(citation.display_filename ?? ""),
+      revision_number: Number(citation.revision_number ?? 0),
+      chunk_count: Number(citation.chunk_count ?? 0),
+      excerpt: String(citation.excerpt ?? ""),
+      score: Number(citation.score ?? 0),
+      page_number:
+        typeof citation.page_number === "number" ? citation.page_number : null,
+      slide_number:
+        typeof citation.slide_number === "number" ? citation.slide_number : null,
+    };
+  });
+}
+
+function formatSourceLocator(source: SourceCitation): string | null {
+  if (typeof source.page_number === "number") {
+    return `Page ${source.page_number}`;
+  }
+  if (typeof source.slide_number === "number") {
+    return `Slide ${source.slide_number}`;
+  }
+  return null;
 }
 
 
 export default function App() {
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
   const [archivedWorkspaces, setArchivedWorkspaces] = useState<WorkspaceSummary[]>([]);
+  const [knowledgeBaseSettingsByWorkspaceId, setKnowledgeBaseSettingsByWorkspaceId] = useState<
+    Record<string, KnowledgeBaseSettings>
+  >({});
   const [defaultWorkspaceModel, setDefaultWorkspaceModel] = useState<ModelCatalogSummary | null>(null);
   const [modelCatalog, setModelCatalog] = useState<ModelCatalogEntry[]>([]);
   const [conversationSummariesByWorkspaceId, setConversationSummariesByWorkspaceId] = useState<
@@ -224,13 +336,28 @@ export default function App() {
   const [pendingConversationMessages, setPendingConversationMessages] = useState<ChatBubble[]>([]);
   const [pendingConversationWorkspaceId, setPendingConversationWorkspaceId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
+  const [composerKnowledgeAnsweringEnabled, setComposerKnowledgeAnsweringEnabled] = useState(false);
   const [newWorkspaceName, setNewWorkspaceName] = useState("");
   const [isStreamInFlight, setIsStreamInFlight] = useState(false);
   const [streamingConversationId, setStreamingConversationId] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [settingsDraft, setSettingsDraft] = useState<WorkspaceSettingsDraft | null>(null);
-  const [activeSettingsTab, setActiveSettingsTab] = useState<"general" | "model">("general");
+  const [knowledgeBaseSettingsDraft, setKnowledgeBaseSettingsDraft] = useState<KnowledgeBaseSettingsDraft | null>(null);
+  const [isKnowledgeBaseSettingsLoading, setIsKnowledgeBaseSettingsLoading] = useState(false);
+  const [isKnowledgeBaseManagementOpen, setIsKnowledgeBaseManagementOpen] = useState(false);
+  const [kbJobList, setKbJobList] = useState<KnowledgeBaseJobList>({
+    active: [],
+    history: [],
+    history_total: 0,
+    history_page: 1,
+  });
+  const [knowledgeDocuments, setKnowledgeDocuments] = useState<KnowledgeDocumentList>({ documents: [] });
+  const [isKbJobsLoading, setIsKbJobsLoading] = useState(false);
+  const [isKnowledgeDocumentsLoading, setIsKnowledgeDocumentsLoading] = useState(false);
+  const [selectedImportFiles, setSelectedImportFiles] = useState<File[]>([]);
+  const [isImporting, setIsImporting] = useState(false);
+  const [activeSettingsTab, setActiveSettingsTab] = useState<"general" | "model" | "knowledgeBase">("general");
   const abortRef = useRef<AbortController | null>(null);
   const activeWorkspaceIdRef = useRef<string | null>(null);
   const activeConversationIdRef = useRef<string | null>(null);
@@ -251,13 +378,32 @@ export default function App() {
   useEffect(() => {
     if (activeWorkspaceId === null) {
       setActiveConversationId(null);
+      setComposerKnowledgeAnsweringEnabled(false);
       setIsSettingsOpen(false);
       setSettingsDraft(null);
+      setKnowledgeBaseSettingsDraft(null);
+      setIsKnowledgeBaseManagementOpen(false);
       setActiveSettingsTab("general");
       return;
     }
     void refreshWorkspaceConversations(activeWorkspaceId);
+    void loadKnowledgeBaseSettings(activeWorkspaceId);
   }, [activeWorkspaceId]);
+
+  useEffect(() => {
+    if (!isKnowledgeBaseManagementOpen || activeWorkspaceId === null) {
+      return;
+    }
+
+    const intervalId = window.setInterval(() => {
+      void loadKbJobs(activeWorkspaceId);
+      void loadKnowledgeDocuments(activeWorkspaceId);
+    }, 2000);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [isKnowledgeBaseManagementOpen, activeWorkspaceId]);
 
   useEffect(() => {
     activeWorkspaceIdRef.current = activeWorkspaceId;
@@ -270,6 +416,16 @@ export default function App() {
   useEffect(() => {
     pendingConversationWorkspaceIdRef.current = pendingConversationWorkspaceId;
   }, [pendingConversationWorkspaceId]);
+
+  useEffect(() => {
+    if (activeWorkspaceId === null) {
+      return;
+    }
+    const activeKnowledgeSettings = knowledgeBaseSettingsByWorkspaceId[activeWorkspaceId];
+    if (activeKnowledgeSettings) {
+      setComposerKnowledgeAnsweringEnabled(activeKnowledgeSettings.knowledge_answering_default);
+    }
+  }, [activeWorkspaceId, knowledgeBaseSettingsByWorkspaceId]);
 
   function setPendingConversationState(workspaceId: string | null, messages: ChatBubble[]) {
     pendingConversationMessagesRef.current = messages;
@@ -390,6 +546,30 @@ export default function App() {
     }
   }
 
+  async function loadKnowledgeBaseSettings(workspaceId: string) {
+    try {
+      setIsKnowledgeBaseSettingsLoading(true);
+      const data = {
+        ...(await getKnowledgeBaseSettings(workspaceId)),
+        workspace_id: workspaceId,
+      };
+      setKnowledgeBaseSettingsByWorkspaceId((current) => ({
+        ...current,
+        [workspaceId]: data,
+      }));
+      setKnowledgeBaseSettingsDraft((current) => {
+        if (current !== null && current.workspaceId === workspaceId) {
+          return current;
+        }
+        return createKnowledgeBaseSettingsDraft(data);
+      });
+    } catch (error) {
+      setErrorMessage(getErrorMessage(error));
+    } finally {
+      setIsKnowledgeBaseSettingsLoading(false);
+    }
+  }
+
   async function loadConversation(conversationId: string) {
     if (!canLeaveSettingsView()) {
       return;
@@ -398,6 +578,8 @@ export default function App() {
       setErrorMessage(null);
       setIsSettingsOpen(false);
       setSettingsDraft(null);
+      setKnowledgeBaseSettingsDraft(null);
+      setIsKnowledgeBaseManagementOpen(false);
       setActiveSettingsTab("general");
       setActiveConversationId(conversationId);
 
@@ -447,6 +629,8 @@ export default function App() {
     }
     setIsSettingsOpen(false);
     setSettingsDraft(null);
+    setKnowledgeBaseSettingsDraft(null);
+    setIsKnowledgeBaseManagementOpen(false);
     setActiveSettingsTab("general");
     setActiveConversationId(null);
     setDraft("");
@@ -462,6 +646,8 @@ export default function App() {
     }
     setIsSettingsOpen(false);
     setSettingsDraft(null);
+    setKnowledgeBaseSettingsDraft(null);
+    setIsKnowledgeBaseManagementOpen(false);
     setActiveSettingsTab("general");
     setActiveWorkspaceId(workspaceId);
     setActiveConversationId(null);
@@ -480,6 +666,8 @@ export default function App() {
       if (activeWorkspaceId === workspaceId) {
         setIsSettingsOpen(false);
         setSettingsDraft(null);
+        setKnowledgeBaseSettingsDraft(null);
+        setIsKnowledgeBaseManagementOpen(false);
         setActiveSettingsTab("general");
         setActiveWorkspaceId(remainingWorkspaces[0]?.workspace_id ?? null);
         setActiveConversationId(null);
@@ -502,6 +690,7 @@ export default function App() {
       }));
       setActiveWorkspaceId(restoredWorkspace.workspace_id);
       setActiveConversationId(null);
+      setIsKnowledgeBaseManagementOpen(false);
       setDraft("");
     } catch (error) {
       setErrorMessage(getErrorMessage(error));
@@ -608,12 +797,31 @@ export default function App() {
       return;
     }
 
+    if (event.event === "sources") {
+      const rawSources = Array.isArray(event.data.sources) ? event.data.sources : [];
+      updateStreamBubble(targetBubbleId, (item) => ({
+        ...item,
+        sources: normalizeSourceCitations(rawSources),
+      }));
+      return;
+    }
+
     if (event.event === "message.done") {
       const status = event.data.status;
       const nextStatus: ChatBubble["status"] =
         status === "completed" || status === "stopped" || status === "error" ? status : "completed";
       updateStreamBubble(targetBubbleId, (item) => ({
         ...item,
+        knowledgeAnsweringRequested: Boolean(event.data.knowledge_answering_requested ?? item.knowledgeAnsweringRequested),
+        knowledgeAnsweringUsed: Boolean(event.data.knowledge_answering_used ?? item.knowledgeAnsweringUsed),
+        fallbackReason:
+          typeof event.data.fallback_reason === "string" || event.data.fallback_reason === null
+            ? (event.data.fallback_reason as string | null)
+            : item.fallbackReason ?? null,
+        sources:
+          Array.isArray(event.data.sources) && event.data.sources.length > 0
+            ? normalizeSourceCitations(event.data.sources)
+            : item.sources,
         status:
           stopRequestedBubbleRef.current === item.id && nextStatus !== "error"
             ? "stopped"
@@ -636,6 +844,9 @@ export default function App() {
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const trimmed = draft.trim();
+    const activeKnowledgeBaseSettings =
+      activeWorkspaceId === null ? null : knowledgeBaseSettingsByWorkspaceId[activeWorkspaceId] ?? null;
+    const knowledgeAnsweringEnabled = composerKnowledgeAnsweringEnabled;
     if (
       !trimmed ||
       isStreamInFlight ||
@@ -647,6 +858,9 @@ export default function App() {
 
     setErrorMessage(null);
     setDraft("");
+    if (activeKnowledgeBaseSettings) {
+      setComposerKnowledgeAnsweringEnabled(activeKnowledgeBaseSettings.knowledge_answering_default);
+    }
 
     const userBubble = createLocalBubble("user", trimmed, "completed");
     const assistantBubble = createLocalBubble("assistant", "", "streaming");
@@ -673,6 +887,7 @@ export default function App() {
           conversation_id: activeConversationId ?? 0,
           message_id: 0,
           message: trimmed,
+          knowledge_answering_enabled: knowledgeAnsweringEnabled,
         },
         controller.signal,
       );
@@ -777,10 +992,13 @@ export default function App() {
     settingsDraft === null
       ? null
       : workspaces.find((item) => item.workspace_id === settingsDraft.workspaceId) ?? activeWorkspace;
+  const savedKnowledgeBaseSettings =
+    settingsDraft === null ? null : knowledgeBaseSettingsByWorkspaceId[settingsDraft.workspaceId] ?? null;
   const settingsSelectedModel =
     settingsDraft === null ? null : modelCatalogById.get(settingsDraft.selectedModelId) ?? null;
   const settingsValidationErrors = getSettingsValidationErrors(settingsDraft, modelCatalog);
-  const hasPendingSettings =
+  const knowledgeBaseSettingsValidationErrors = getKnowledgeBaseSettingsValidationErrors(knowledgeBaseSettingsDraft);
+  const hasPendingWorkspaceSettings =
     settingsDraft !== null &&
     settingsWorkspace !== null &&
     (settingsDraft.name !== settingsWorkspace.name ||
@@ -788,7 +1006,20 @@ export default function App() {
       settingsDraft.selectedModelId !== settingsWorkspace.selected_model.model_id ||
       JSON.stringify(normalizeModelSettings(settingsDraft.modelSettings)) !==
         JSON.stringify(normalizeModelSettings(settingsWorkspace.model_settings)));
-  const canSaveSettings = hasPendingSettings && !hasValidationErrors(settingsValidationErrors);
+  const hasPendingKnowledgeBaseSettings =
+    knowledgeBaseSettingsDraft !== null &&
+    savedKnowledgeBaseSettings !== null &&
+    (knowledgeBaseSettingsDraft.chunkSize !== savedKnowledgeBaseSettings.chunk_size ||
+      knowledgeBaseSettingsDraft.chunkOverlap !== savedKnowledgeBaseSettings.chunk_overlap ||
+      knowledgeBaseSettingsDraft.retrievalTopK !== savedKnowledgeBaseSettings.retrieval_top_k ||
+      knowledgeBaseSettingsDraft.similarityThreshold !== savedKnowledgeBaseSettings.similarity_threshold ||
+      knowledgeBaseSettingsDraft.knowledgeAnsweringDefault !==
+        savedKnowledgeBaseSettings.knowledge_answering_default);
+  const hasPendingSettings = hasPendingWorkspaceSettings || hasPendingKnowledgeBaseSettings;
+  const canSaveSettings =
+    hasPendingSettings &&
+    !hasValidationErrors(settingsValidationErrors) &&
+    !hasKnowledgeBaseValidationErrors(knowledgeBaseSettingsValidationErrors);
   const visibleConversations = activeWorkspaceId ? conversationSummariesByWorkspaceId[activeWorkspaceId] ?? [] : [];
   const activeMessages =
     activeConversationId === null
@@ -815,7 +1046,7 @@ export default function App() {
     settingsSelectedModel === null;
 
   function canLeaveSettingsView(): boolean {
-    if (!isSettingsOpen || !hasPendingSettings) {
+    if ((!isSettingsOpen && !isKnowledgeBaseManagementOpen) || !hasPendingSettings) {
       return true;
     }
     return window.confirm("Discard pending settings?");
@@ -827,8 +1058,14 @@ export default function App() {
     }
     setErrorMessage(null);
     setActiveSettingsTab("general");
+    setIsKnowledgeBaseManagementOpen(false);
     setIsSettingsOpen(true);
     setSettingsDraft(createSettingsDraft(activeWorkspace));
+    const cachedKnowledgeBaseSettings = knowledgeBaseSettingsByWorkspaceId[activeWorkspace.workspace_id];
+    setKnowledgeBaseSettingsDraft(
+      cachedKnowledgeBaseSettings ? createKnowledgeBaseSettingsDraft(cachedKnowledgeBaseSettings) : null,
+    );
+    void loadKnowledgeBaseSettings(activeWorkspace.workspace_id);
   }
 
   function closeWorkspaceSettings() {
@@ -836,8 +1073,113 @@ export default function App() {
       return;
     }
     setIsSettingsOpen(false);
+    setIsKnowledgeBaseManagementOpen(false);
     setSettingsDraft(null);
+    setKnowledgeBaseSettingsDraft(null);
     setActiveSettingsTab("general");
+  }
+
+  function openKnowledgeBaseManagement() {
+    if (activeWorkspace === null) {
+      return;
+    }
+    if (!canLeaveSettingsView()) {
+      return;
+    }
+    setIsSettingsOpen(false);
+    setIsKnowledgeBaseManagementOpen(true);
+    setSettingsDraft(null);
+    setActiveSettingsTab("knowledgeBase");
+    void loadKbJobs(activeWorkspace.workspace_id);
+    void loadKnowledgeDocuments(activeWorkspace.workspace_id);
+  }
+
+  async function loadKbJobs(workspaceId: string, page = 1) {
+    setIsKbJobsLoading(true);
+    try {
+      const result = await listKnowledgeBaseJobs(workspaceId, page);
+      setKbJobList(result);
+    } catch {
+      // Ignore load errors; jobs list will stay empty.
+    } finally {
+      setIsKbJobsLoading(false);
+    }
+  }
+
+  async function loadKnowledgeDocuments(workspaceId: string) {
+    setIsKnowledgeDocumentsLoading(true);
+    try {
+      const result = await listKnowledgeBaseDocuments(workspaceId);
+      setKnowledgeDocuments(result);
+    } catch {
+      // Ignore load errors; document list will stay empty.
+    } finally {
+      setIsKnowledgeDocumentsLoading(false);
+    }
+  }
+
+  async function handleImportFiles() {
+    if (!activeWorkspace || selectedImportFiles.length === 0) return;
+    setIsImporting(true);
+    try {
+      await createImportJob(activeWorkspace.workspace_id, selectedImportFiles);
+      setSelectedImportFiles([]);
+      await loadKbJobs(activeWorkspace.workspace_id);
+      await loadKnowledgeDocuments(activeWorkspace.workspace_id);
+    } catch {
+      // Ignore import errors for this slice.
+    } finally {
+      setIsImporting(false);
+    }
+  }
+
+  async function handleCancelJob(jobId: string) {
+    if (!activeWorkspace) return;
+    try {
+      await cancelImportJob(activeWorkspace.workspace_id, jobId);
+      await loadKbJobs(activeWorkspace.workspace_id);
+    } catch {
+      // Ignore cancel errors.
+    }
+  }
+
+  async function handleDeleteKnowledgeDocument(knowledgeDocumentId: string) {
+    if (!activeWorkspace) return;
+    try {
+      await deleteKnowledgeBaseDocument(activeWorkspace.workspace_id, knowledgeDocumentId);
+      await loadKnowledgeDocuments(activeWorkspace.workspace_id);
+      await loadKbJobs(activeWorkspace.workspace_id);
+    } catch {
+      // Ignore delete errors.
+    }
+  }
+
+  async function handleRebuildKnowledgeBase() {
+    if (!activeWorkspace) return;
+    setErrorMessage(null);
+    try {
+      await createRebuildJob(activeWorkspace.workspace_id);
+      await loadKbJobs(activeWorkspace.workspace_id);
+      await loadKnowledgeBaseSettings(activeWorkspace.workspace_id);
+    } catch (error) {
+      setErrorMessage(getErrorMessage(error));
+    }
+  }
+
+  function backToWorkspaceSettingsFromKnowledgeBaseManagement() {
+    if (activeWorkspace === null) {
+      return;
+    }
+    setErrorMessage(null);
+    setIsKnowledgeBaseManagementOpen(false);
+    setIsSettingsOpen(true);
+    setSettingsDraft(createSettingsDraft(activeWorkspace));
+    const cachedKnowledgeBaseSettings = knowledgeBaseSettingsByWorkspaceId[activeWorkspace.workspace_id];
+    setKnowledgeBaseSettingsDraft(
+      cachedKnowledgeBaseSettings ? createKnowledgeBaseSettingsDraft(cachedKnowledgeBaseSettings) : null,
+    );
+    setActiveSettingsTab("knowledgeBase");
+    void loadKnowledgeBaseSettings(activeWorkspace.workspace_id);
   }
 
   function updateSelectedModel(nextModelId: string) {
@@ -869,6 +1211,22 @@ export default function App() {
     });
   }
 
+  function updateKnowledgeBaseSetting(
+    key: "chunkSize" | "chunkOverlap" | "retrievalTopK" | "similarityThreshold",
+    rawValue: string,
+  ) {
+    setKnowledgeBaseSettingsDraft((current) => {
+      if (current === null) {
+        return current;
+      }
+      const nextValue = rawValue === "" ? Number.NaN : Number(rawValue);
+      return {
+        ...current,
+        [key]: nextValue,
+      };
+    });
+  }
+
   async function saveWorkspaceSettings() {
     if (settingsDraft === null || !canSaveSettings) {
       return;
@@ -876,17 +1234,41 @@ export default function App() {
 
     try {
       setErrorMessage(null);
-      const updatedWorkspace = await updateWorkspace(settingsDraft.workspaceId, {
-        name: settingsDraft.name.trim(),
-        system_message: settingsDraft.systemMessage.trim(),
-        selected_model_id: settingsDraft.selectedModelId,
-        model_settings: normalizeModelSettings(settingsDraft.modelSettings),
-      });
-      setWorkspaces((current) =>
-        current.map((item) => (item.workspace_id === updatedWorkspace.workspace_id ? updatedWorkspace : item)),
-      );
-      setSettingsDraft(createSettingsDraft(updatedWorkspace));
-      setActiveSettingsTab("general");
+      let updatedWorkspace: WorkspaceSummary | null = null;
+      if (hasPendingWorkspaceSettings) {
+        updatedWorkspace = await updateWorkspace(settingsDraft.workspaceId, {
+          name: settingsDraft.name.trim(),
+          system_message: settingsDraft.systemMessage.trim(),
+          selected_model_id: settingsDraft.selectedModelId,
+          model_settings: normalizeModelSettings(settingsDraft.modelSettings),
+        });
+        const savedWorkspace = updatedWorkspace;
+        if (savedWorkspace !== null) {
+          setWorkspaces((current) =>
+            current.map((item) => (item.workspace_id === savedWorkspace.workspace_id ? savedWorkspace : item)),
+          );
+          setSettingsDraft(createSettingsDraft(savedWorkspace));
+        }
+      }
+
+      if (hasPendingKnowledgeBaseSettings && knowledgeBaseSettingsDraft !== null) {
+        const updatedKnowledgeBaseSettings = await updateKnowledgeBaseSettings(settingsDraft.workspaceId, {
+          chunk_size: knowledgeBaseSettingsDraft.chunkSize,
+          chunk_overlap: knowledgeBaseSettingsDraft.chunkOverlap,
+          retrieval_top_k: knowledgeBaseSettingsDraft.retrievalTopK,
+          similarity_threshold: knowledgeBaseSettingsDraft.similarityThreshold,
+          knowledge_answering_default: knowledgeBaseSettingsDraft.knowledgeAnsweringDefault,
+        });
+        setKnowledgeBaseSettingsByWorkspaceId((current) => ({
+          ...current,
+          [updatedKnowledgeBaseSettings.workspace_id]: updatedKnowledgeBaseSettings,
+        }));
+        setKnowledgeBaseSettingsDraft(createKnowledgeBaseSettingsDraft(updatedKnowledgeBaseSettings));
+      }
+
+      if (!hasPendingWorkspaceSettings && settingsWorkspace !== null) {
+        setSettingsDraft(createSettingsDraft(settingsWorkspace));
+      }
       setIsSettingsOpen(true);
     } catch (error) {
       setErrorMessage(getErrorMessage(error));
@@ -1180,7 +1562,11 @@ export default function App() {
                   </div>
                   <div>
                     <h2 className="font-['Iowan_Old_Style','Palatino_Linotype','Noto_Serif_TC',serif] text-3xl font-semibold tracking-[-0.03em] text-stone-950">
-                      {isSettingsOpen ? "Workspace Settings" : activeTitle}
+                      {isKnowledgeBaseManagementOpen
+                        ? "Knowledge Base Management"
+                        : isSettingsOpen
+                          ? "Workspace Settings"
+                          : activeTitle}
                     </h2>
                     <p className="mt-2 text-sm text-stone-600">
                       {activeWorkspace
@@ -1193,11 +1579,27 @@ export default function App() {
                   <button
                     type="button"
                     className="secondary-button inline-flex items-center justify-center gap-2 self-start rounded-2xl border border-stone-200 bg-white/90 px-4 py-3 text-sm font-medium text-stone-700 transition duration-200 hover:-translate-y-0.5 hover:border-rose-200 hover:text-rose-500 focus:outline-none focus:ring-4 focus:ring-rose-200/70"
-                    onClick={isSettingsOpen ? closeWorkspaceSettings : openWorkspaceSettings}
-                    aria-label={isSettingsOpen ? "Back to chat" : "Open workspace settings"}
+                    onClick={
+                      isKnowledgeBaseManagementOpen
+                        ? backToWorkspaceSettingsFromKnowledgeBaseManagement
+                        : isSettingsOpen
+                          ? closeWorkspaceSettings
+                          : openWorkspaceSettings
+                    }
+                    aria-label={
+                      isKnowledgeBaseManagementOpen
+                        ? "Workspace settings"
+                        : isSettingsOpen
+                          ? "Back to chat"
+                          : "Open workspace settings"
+                    }
                   >
                     <SlidersIcon className="h-4 w-4" />
-                    {isSettingsOpen ? "Back to chat" : "Settings"}
+                    {isKnowledgeBaseManagementOpen
+                      ? "Workspace settings"
+                      : isSettingsOpen
+                        ? "Back to chat"
+                        : "Settings"}
                   </button>
                 ) : null}
               </div>
@@ -1209,7 +1611,220 @@ export default function App() {
               </div>
             ) : null}
 
-            {isSettingsOpen && settingsDraft && settingsWorkspace ? (
+            {isKnowledgeBaseManagementOpen && activeWorkspace ? (
+              <>
+                <section className="messages settings-panel chat-scrollbar overflow-y-auto px-5 py-5 md:px-8">
+                  <div className="mx-auto flex w-full max-w-4xl flex-col gap-6 rounded-[2rem] border border-white/80 bg-white/88 p-5 shadow-[0_20px_50px_rgba(28,25,23,0.08)] md:p-7">
+                    <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+                      <div>
+                        <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-stone-500">
+                          Workspace knowledge base
+                        </p>
+                      </div>
+                    </div>
+
+                    {knowledgeBaseSettingsDraft?.rebuildRequired ? (
+                      <div className="rounded-[1.5rem] border border-amber-200 bg-amber-50 px-5 py-5 text-sm text-amber-900">
+                        <div className="font-semibold">Rebuild Required</div>
+                        <div className="mt-1">
+                          Chunking settings changed. Current retrieval keeps using the active version until the rebuild
+                          completes.
+                        </div>
+                        <button
+                          type="button"
+                          className="mt-4 rounded-xl bg-stone-950 px-4 py-2 text-sm font-medium text-white hover:bg-rose-500"
+                          onClick={() => {
+                            void handleRebuildKnowledgeBase();
+                          }}
+                        >
+                          Rebuild Knowledge Base
+                        </button>
+                      </div>
+                    ) : null}
+
+                    {/* Upload section */}
+                    <div className="rounded-[1.75rem] border border-stone-200 bg-stone-50/80 px-6 py-6 flex flex-col gap-4">
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-stone-500">
+                        Import documents
+                      </p>
+                      <div className="flex flex-wrap items-center gap-3">
+                        <label
+                          htmlFor="kb-file-input"
+                          className="cursor-pointer rounded-xl border border-stone-200 bg-white px-4 py-2 text-sm font-medium text-stone-700 hover:border-stone-300 hover:bg-stone-50"
+                        >
+                          Select files to import
+                          <input
+                            id="kb-file-input"
+                            type="file"
+                            multiple
+                            aria-label="Select files to import"
+                            className="sr-only"
+                            onChange={(e) => {
+                              const files = Array.from(e.target.files ?? []);
+                              setSelectedImportFiles(files);
+                            }}
+                          />
+                        </label>
+                        {selectedImportFiles.length > 0 && (
+                          <span className="text-sm text-stone-600">
+                            {selectedImportFiles.length} file{selectedImportFiles.length !== 1 ? "s" : ""} selected
+                          </span>
+                        )}
+                        <button
+                          type="button"
+                          className="rounded-xl bg-stone-900 px-4 py-2 text-sm font-medium text-white hover:bg-stone-700 disabled:opacity-50"
+                          disabled={selectedImportFiles.length === 0 || isImporting}
+                          onClick={() => { void handleImportFiles(); }}
+                        >
+                          Import files
+                        </button>
+                      </div>
+                    </div>
+
+                    <section aria-label="Knowledge documents">
+                      <p className="mb-3 text-[11px] font-semibold uppercase tracking-[0.18em] text-stone-500">
+                        Knowledge documents
+                      </p>
+                      {isKnowledgeDocumentsLoading ? (
+                        <p className="text-sm text-stone-500">Loading…</p>
+                      ) : knowledgeDocuments.documents.length === 0 ? (
+                        <p className="text-sm text-stone-400">No imported knowledge documents yet.</p>
+                      ) : (
+                        <ul className="flex flex-col gap-3">
+                          {knowledgeDocuments.documents.map((document) => (
+                            <li
+                              key={document.knowledge_document_id}
+                              className="rounded-2xl border border-stone-200 bg-white px-4 py-4"
+                            >
+                              <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                                <div className="space-y-2">
+                                  <div className="text-sm font-medium text-stone-800">{document.display_filename}</div>
+                                  <div className="flex flex-wrap gap-2 text-xs text-stone-500">
+                                    <span>Revision {document.revision_number}</span>
+                                    <span>{document.chunk_count} chunks</span>
+                                    {document.locator_summary.map((locator) => (
+                                      <span key={`${document.knowledge_document_id}-${locator}`}>{locator}</span>
+                                    ))}
+                                  </div>
+                                </div>
+                                <button
+                                  type="button"
+                                  className="self-start text-xs text-rose-500 hover:underline"
+                                  aria-label={`Delete ${document.display_filename}`}
+                                  onClick={() => {
+                                    void handleDeleteKnowledgeDocument(document.knowledge_document_id);
+                                  }}
+                                >
+                                  Delete
+                                </button>
+                              </div>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </section>
+
+                    {/* Active jobs */}
+                    <section aria-label="Active jobs">
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-stone-500 mb-3">
+                        Active jobs
+                      </p>
+                      {isKbJobsLoading ? (
+                        <p className="text-sm text-stone-500">Loading…</p>
+                      ) : kbJobList.active.length === 0 ? (
+                        <p className="text-sm text-stone-400">No active import jobs.</p>
+                      ) : (
+                        <ul className="flex flex-col gap-2">
+                          {kbJobList.active.map((job) => (
+                            <li
+                              key={job.job_id}
+                              className="flex items-center justify-between rounded-xl border border-stone-200 bg-white px-4 py-3"
+                            >
+                              <span className="text-sm text-stone-700">
+                                {formatKnowledgeBaseJobSummary(job)}
+                              </span>
+                              {job.status === "queued" && (
+                                <button
+                                  type="button"
+                                  aria-label="Cancel job"
+                                  className="text-xs text-rose-500 hover:underline"
+                                  onClick={() => { void handleCancelJob(job.job_id); }}
+                                >
+                                  Cancel
+                                </button>
+                              )}
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </section>
+
+                    {/* Job history */}
+                    <section aria-label="Job history">
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-stone-500 mb-3">
+                        Job history
+                      </p>
+                      {kbJobList.history.length === 0 ? (
+                        <p className="text-sm text-stone-400">No job history yet.</p>
+                      ) : (
+                        <ul className="flex flex-col gap-2">
+                          {kbJobList.history.map((job) => (
+                            <li
+                              key={job.job_id}
+                              className="rounded-xl border border-stone-200 bg-white px-4 py-3"
+                            >
+                              <div className="flex items-center justify-between gap-3">
+                                <span className="text-sm text-stone-700">
+                                  {formatKnowledgeBaseJobSummary(job)}
+                                </span>
+                              </div>
+                              {job.items && job.items.length > 0 ? (
+                                <ul className="mt-3 flex flex-col gap-2">
+                                  {job.items.map((item) => (
+                                    <li
+                                      key={item.item_id}
+                                      className="rounded-lg border border-stone-100 bg-stone-50 px-3 py-2 text-xs text-stone-600"
+                                    >
+                                      <span className="font-medium text-stone-700">{item.filename}</span>
+                                      {" | "}
+                                      <span>{item.outcome ?? item.status}</span>
+                                      {item.error_message ? ` | ${item.error_message}` : ""}
+                                    </li>
+                                  ))}
+                                </ul>
+                              ) : null}
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                      {kbJobList.history_total > kbJobList.history.length && (
+                        <button
+                          type="button"
+                          className="mt-3 text-sm text-stone-500 hover:text-stone-700"
+                          onClick={() => {
+                            void loadKbJobs(activeWorkspace.workspace_id, kbJobList.history_page + 1);
+                          }}
+                        >
+                          Load more history
+                        </button>
+                      )}
+                    </section>
+                  </div>
+                </section>
+
+                <div className="composer settings-actions border-t border-stone-200/80 bg-[rgba(255,248,242,0.88)] px-5 py-4 md:px-8">
+                  <div className="settings-actions-row mx-auto flex w-full max-w-4xl justify-end gap-3">
+                    <button
+                      type="button"
+                      className="secondary-button rounded-2xl border border-stone-200 bg-white/90 px-4 py-3 text-sm font-medium text-stone-700 transition duration-200 hover:border-rose-200 hover:text-rose-500"
+                      onClick={backToWorkspaceSettingsFromKnowledgeBaseManagement}
+                    >
+                      Back to Workspace Settings
+                    </button>
+                  </div>
+                </div>
+              </>
+            ) : isSettingsOpen && settingsDraft && settingsWorkspace ? (
               <>
                 <section className="messages settings-panel chat-scrollbar overflow-y-auto px-5 py-5 md:px-8">
                   <div className="mx-auto flex w-full max-w-4xl flex-col gap-6 rounded-[2rem] border border-white/80 bg-white/88 p-5 shadow-[0_20px_50px_rgba(28,25,23,0.08)] md:p-7">
@@ -1219,7 +1834,7 @@ export default function App() {
                           Workspace-owned settings
                         </p>
                         <h3 className="mt-2 font-['Iowan_Old_Style','Palatino_Linotype','Noto_Serif_TC',serif] text-2xl font-semibold tracking-[-0.03em] text-stone-950">
-                          Tune tone, instructions, and model behavior
+                          Tune tone, instructions, model behavior, and retrieval defaults
                         </h3>
                       </div>
                       <div className="rounded-full bg-stone-100 px-3 py-1 text-xs text-stone-500">
@@ -1255,6 +1870,20 @@ export default function App() {
                         onClick={() => setActiveSettingsTab("model")}
                       >
                         Model
+                      </button>
+                      <button
+                        type="button"
+                        className={cn(
+                          "settings-tab rounded-full px-4 py-2 text-sm font-medium transition duration-200",
+                          activeSettingsTab === "knowledgeBase"
+                            ? "active bg-stone-950 text-stone-50"
+                            : "bg-stone-100 text-stone-600 hover:bg-rose-50 hover:text-rose-600",
+                        )}
+                        role="tab"
+                        aria-selected={activeSettingsTab === "knowledgeBase"}
+                        onClick={() => setActiveSettingsTab("knowledgeBase")}
+                      >
+                        Knowledge Base
                       </button>
                     </div>
 
@@ -1300,7 +1929,7 @@ export default function App() {
                           ) : null}
                         </div>
                       </div>
-                    ) : (
+                    ) : activeSettingsTab === "model" ? (
                       <div className="grid gap-5">
                         <div className="settings-field">
                           <label htmlFor="selected-model-input" className="mb-2 block text-sm font-medium text-stone-700">
@@ -1377,6 +2006,140 @@ export default function App() {
                             Select an enabled model to review the available Model-specific Settings.
                           </div>
                         )}
+                      </div>
+                    ) : isKnowledgeBaseSettingsLoading && knowledgeBaseSettingsDraft === null ? (
+                      <div className="settings-hint rounded-[1.25rem] border border-dashed border-stone-300 bg-stone-50/80 px-4 py-4 text-sm text-stone-500">
+                        Loading Knowledge Base Settings...
+                      </div>
+                    ) : knowledgeBaseSettingsDraft ? (
+                      <div className="grid gap-5">
+                        {knowledgeBaseSettingsDraft.rebuildRequired ? (
+                          <div className="rounded-[1.25rem] border border-amber-200 bg-amber-50 px-4 py-4 text-sm text-amber-900">
+                            <div className="font-semibold">Rebuild Required</div>
+                            <div className="mt-1">
+                              Chunking settings changed. Rebuild the Knowledge Base when you're ready.
+                            </div>
+                          </div>
+                        ) : null}
+
+                        <div className="settings-field">
+                          <label htmlFor="kb-chunk-size-input" className="mb-2 block text-sm font-medium text-stone-700">
+                            Chunk Size
+                          </label>
+                          <input
+                            id="kb-chunk-size-input"
+                            className="w-full rounded-[1.25rem] border border-stone-200 bg-stone-50 px-4 py-3 text-sm text-stone-900 outline-none transition duration-200 focus:border-rose-300 focus:bg-white focus:ring-4 focus:ring-rose-200/60"
+                            type="number"
+                            min={1}
+                            step={1}
+                            value={String(knowledgeBaseSettingsDraft.chunkSize)}
+                            onChange={(nextEvent) => updateKnowledgeBaseSetting("chunkSize", nextEvent.target.value)}
+                            aria-label="Chunk Size"
+                          />
+                          {knowledgeBaseSettingsValidationErrors.chunkSize ? (
+                            <div className="field-error mt-2 text-sm text-rose-700">
+                              {knowledgeBaseSettingsValidationErrors.chunkSize}
+                            </div>
+                          ) : null}
+                        </div>
+
+                        <div className="settings-field">
+                          <label htmlFor="kb-chunk-overlap-input" className="mb-2 block text-sm font-medium text-stone-700">
+                            Chunk Overlap
+                          </label>
+                          <input
+                            id="kb-chunk-overlap-input"
+                            className="w-full rounded-[1.25rem] border border-stone-200 bg-stone-50 px-4 py-3 text-sm text-stone-900 outline-none transition duration-200 focus:border-rose-300 focus:bg-white focus:ring-4 focus:ring-rose-200/60"
+                            type="number"
+                            min={0}
+                            step={1}
+                            value={String(knowledgeBaseSettingsDraft.chunkOverlap)}
+                            onChange={(nextEvent) => updateKnowledgeBaseSetting("chunkOverlap", nextEvent.target.value)}
+                            aria-label="Chunk Overlap"
+                          />
+                          {knowledgeBaseSettingsValidationErrors.chunkOverlap ? (
+                            <div className="field-error mt-2 text-sm text-rose-700">
+                              {knowledgeBaseSettingsValidationErrors.chunkOverlap}
+                            </div>
+                          ) : null}
+                        </div>
+
+                        <div className="settings-field">
+                          <label htmlFor="kb-top-k-input" className="mb-2 block text-sm font-medium text-stone-700">
+                            Top K
+                          </label>
+                          <input
+                            id="kb-top-k-input"
+                            className="w-full rounded-[1.25rem] border border-stone-200 bg-stone-50 px-4 py-3 text-sm text-stone-900 outline-none transition duration-200 focus:border-rose-300 focus:bg-white focus:ring-4 focus:ring-rose-200/60"
+                            type="number"
+                            min={1}
+                            step={1}
+                            value={String(knowledgeBaseSettingsDraft.retrievalTopK)}
+                            onChange={(nextEvent) => updateKnowledgeBaseSetting("retrievalTopK", nextEvent.target.value)}
+                            aria-label="Top K"
+                          />
+                          {knowledgeBaseSettingsValidationErrors.retrievalTopK ? (
+                            <div className="field-error mt-2 text-sm text-rose-700">
+                              {knowledgeBaseSettingsValidationErrors.retrievalTopK}
+                            </div>
+                          ) : null}
+                        </div>
+
+                        <div className="settings-field">
+                          <label htmlFor="kb-similarity-threshold-input" className="mb-2 block text-sm font-medium text-stone-700">
+                            Similarity Threshold
+                          </label>
+                          <input
+                            id="kb-similarity-threshold-input"
+                            className="w-full rounded-[1.25rem] border border-stone-200 bg-stone-50 px-4 py-3 text-sm text-stone-900 outline-none transition duration-200 focus:border-rose-300 focus:bg-white focus:ring-4 focus:ring-rose-200/60"
+                            type="number"
+                            min={0}
+                            max={1}
+                            step={0.05}
+                            value={String(knowledgeBaseSettingsDraft.similarityThreshold)}
+                            onChange={(nextEvent) => updateKnowledgeBaseSetting("similarityThreshold", nextEvent.target.value)}
+                            aria-label="Similarity Threshold"
+                          />
+                          {knowledgeBaseSettingsValidationErrors.similarityThreshold ? (
+                            <div className="field-error mt-2 text-sm text-rose-700">
+                              {knowledgeBaseSettingsValidationErrors.similarityThreshold}
+                            </div>
+                          ) : null}
+                        </div>
+
+                        <label className="flex items-center gap-3 rounded-[1.25rem] border border-stone-200 bg-stone-50 px-4 py-4 text-sm text-stone-700">
+                          <input
+                            type="checkbox"
+                            checked={knowledgeBaseSettingsDraft.knowledgeAnsweringDefault}
+                            onChange={(nextEvent) =>
+                              setKnowledgeBaseSettingsDraft((current) =>
+                                current === null
+                                  ? current
+                                  : { ...current, knowledgeAnsweringDefault: nextEvent.target.checked },
+                              )
+                            }
+                            aria-label="Knowledge Answering Default"
+                          />
+                          <span>Knowledge Answering Default</span>
+                        </label>
+
+                        <div className="rounded-[1.25rem] border border-stone-200 bg-[#f6efe6] px-4 py-4 text-sm text-stone-600">
+                          Use this tab for workspace-owned retrieval defaults, then switch to management for files and jobs.
+                        </div>
+
+                        <div>
+                          <button
+                            type="button"
+                            className="secondary-button rounded-2xl border border-stone-200 bg-white/90 px-4 py-3 text-sm font-medium text-stone-700 transition duration-200 hover:border-rose-200 hover:text-rose-500"
+                            onClick={openKnowledgeBaseManagement}
+                          >
+                            Open Knowledge Base Management
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="settings-hint rounded-[1.25rem] border border-dashed border-stone-300 bg-stone-50/80 px-4 py-4 text-sm text-stone-500">
+                        Knowledge Base Settings are unavailable right now.
                       </div>
                     )}
 
@@ -1485,6 +2248,32 @@ export default function App() {
                                   {"\u767c\u751f\u932f\u8aa4"}
                                 </div>
                               ) : null}
+                              {message.role === "assistant" && message.fallbackReason === "knowledge_base_unavailable" ? (
+                                <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                                  Knowledge Answering unavailable for this turn. Fell back to chat.
+                                </div>
+                              ) : null}
+                              {message.role === "assistant" && message.fallbackReason === "retrieval_insufficient" ? (
+                                <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                                  Knowledge Answering found insufficient evidence for this turn. Fell back to chat.
+                                </div>
+                              ) : null}
+                              {message.role === "assistant" && (message.sources?.length ?? 0) > 0 ? (
+                                <div className="mt-4 rounded-2xl border border-stone-200 bg-stone-50 px-4 py-3 text-sm text-stone-700">
+                                  <div className="mb-2 text-xs font-semibold uppercase tracking-[0.14em] text-stone-500">
+                                    Sources
+                                  </div>
+                                  {message.sources?.map((source) => (
+                                    <div key={`${source.knowledge_document_id}-${source.revision_number}`} className="mb-3 last:mb-0">
+                                      <div className="font-medium text-stone-900">{source.display_filename}</div>
+                                      <div className="text-xs text-stone-500">
+                                        {formatSourceLocator(source) ?? "Document excerpt"}
+                                      </div>
+                                      <div className="mt-1 text-sm text-stone-700">{source.excerpt}</div>
+                                    </div>
+                                  ))}
+                                </div>
+                              ) : null}
                             </div>
                           </div>
                         </div>
@@ -1511,6 +2300,16 @@ export default function App() {
                         </span>
                       )}
                     </div>
+                    <label className="mb-3 inline-flex items-center gap-3 rounded-full border border-stone-200 bg-white/90 px-4 py-2 text-sm text-stone-700">
+                      <input
+                        type="checkbox"
+                        aria-label="Knowledge Answering"
+                        checked={composerKnowledgeAnsweringEnabled}
+                        onChange={(nextEvent) => setComposerKnowledgeAnsweringEnabled(nextEvent.target.checked)}
+                        disabled={activeWorkspaceId === null || isGenerationBlocked || isStreamInFlight}
+                      />
+                      <span>Knowledge Answering</span>
+                    </label>
                     <form className="composer-form grid gap-3 md:grid-cols-[minmax(0,1fr)_auto]" onSubmit={handleSubmit}>
                       <textarea
                         className="min-h-32 w-full rounded-[1.75rem] border border-stone-200 bg-white px-5 py-4 text-[15px] text-stone-900 outline-none transition duration-200 placeholder:text-stone-400 focus:border-rose-300 focus:ring-4 focus:ring-rose-200/60 disabled:cursor-not-allowed disabled:bg-stone-100"

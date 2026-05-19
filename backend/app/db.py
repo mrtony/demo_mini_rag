@@ -100,12 +100,43 @@ def _requires_schema_reset(sync_connection) -> bool:
         return False
     if "workspace_model_settings" not in table_names:
         return True
+    if "workspace_knowledge_base_settings" not in table_names:
+        return True
+    if "knowledge_base_jobs" not in table_names:
+        return True
+    if "knowledge_base_versions" not in table_names:
+        return True
+    if "knowledge_documents" not in table_names:
+        return True
+    if "knowledge_document_revisions" not in table_names:
+        return True
+    if "retrieval_traces" not in table_names:
+        return True
+    if "retrieval_trace_sources" not in table_names:
+        return True
     conversation_columns = {column["name"] for column in inspector.get_columns("conversations")}
     model_catalog_columns = {column["name"] for column in inspector.get_columns("model_catalog")}
+    message_columns = {column["name"] for column in inspector.get_columns("messages")}
+    workspace_columns = {column["name"] for column in inspector.get_columns("workspaces")}
+    kb_job_columns = {column["name"] for column in inspector.get_columns("knowledge_base_jobs")}
+    kb_job_item_columns = (
+        {column["name"] for column in inspector.get_columns("knowledge_base_job_items")}
+        if "knowledge_base_job_items" in table_names
+        else set()
+    )
     return (
         "workspace_fk" not in conversation_columns
         or "settings_schema_json" not in model_catalog_columns
         or "settings_defaults_json" not in model_catalog_columns
+        or "knowledge_answering_requested" not in message_columns
+        or "knowledge_answering_used" not in message_columns
+        or "fallback_reason" not in message_columns
+        or "retrieval_query" not in message_columns
+        or "sources_json" not in message_columns
+        or "active_knowledge_base_version_fk" not in workspace_columns
+        or "job_type" not in kb_job_columns
+        or "target_version_fk" not in kb_job_columns
+        or "mime_type" not in kb_job_item_columns
     )
 
 

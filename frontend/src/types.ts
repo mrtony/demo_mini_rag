@@ -38,6 +38,56 @@ export type WorkspaceSummary = {
   updated_at: string;
 };
 
+export type KnowledgeBaseSettings = {
+  workspace_id: string;
+  chunk_size: number;
+  chunk_overlap: number;
+  retrieval_top_k: number;
+  similarity_threshold: number;
+  knowledge_answering_default: boolean;
+  rebuild_required: boolean;
+};
+
+export type KnowledgeBaseJobItem = {
+  item_id: string;
+  filename: string;
+  status: string;
+  outcome: string | null;
+  error_message: string | null;
+};
+
+export type KnowledgeBaseJob = {
+  job_id: string;
+  workspace_id: string;
+  job_type?: "import" | "rebuild";
+  status: "queued" | "running" | "completed" | "failed" | "canceled";
+  file_count: number;
+  created_at: string;
+  items?: KnowledgeBaseJobItem[];
+  completed_at: string | null;
+};
+
+export type KnowledgeBaseJobList = {
+  active: KnowledgeBaseJob[];
+  history: KnowledgeBaseJob[];
+  history_total: number;
+  history_page: number;
+};
+
+export type KnowledgeDocument = {
+  knowledge_document_id: string;
+  display_filename: string;
+  revision_number: number;
+  chunk_count: number;
+  locator_summary: string[];
+  created_at: string;
+  updated_at: string;
+};
+
+export type KnowledgeDocumentList = {
+  documents: KnowledgeDocument[];
+};
+
 export type ConversationSummary = {
   workspace_id: string;
   conversation_id: string;
@@ -50,8 +100,24 @@ export type StoredMessage = {
   query: string;
   response: string;
   status: string;
+  knowledge_answering_requested?: boolean;
+  knowledge_answering_used?: boolean;
+  fallback_reason?: string | null;
+  retrieval_query?: string | null;
+  sources?: SourceCitation[];
   created_at: string;
   updated_at: string;
+};
+
+export type SourceCitation = {
+  knowledge_document_id: string;
+  display_filename: string;
+  revision_number: number;
+  chunk_count: number;
+  excerpt: string;
+  score: number;
+  page_number?: number | null;
+  slide_number?: number | null;
 };
 
 export type ConversationDetail = {
@@ -69,6 +135,10 @@ export type ChatBubble = {
   content: string;
   status: "streaming" | "completed" | "stopped" | "error";
   messageId?: number;
+  knowledgeAnsweringRequested?: boolean;
+  knowledgeAnsweringUsed?: boolean;
+  fallbackReason?: string | null;
+  sources?: SourceCitation[];
 };
 
 export type ChatStreamRequest = {
@@ -76,6 +146,7 @@ export type ChatStreamRequest = {
   conversation_id: string | number;
   message_id: number;
   message: string;
+  knowledge_answering_enabled?: boolean;
 };
 
 export type ParsedSseEvent = {

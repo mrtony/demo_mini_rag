@@ -42,6 +42,10 @@ class FakeChatService:
         await asyncio.sleep(0)
         yield ChatEvent(state=ChatStreamState.COMPLETED)
 
+    async def stream_prompt_messages(self, prompt_messages, *, prompt_length: int, history_size: int):
+        async for event in self.stream_chat([], ""):
+            yield event
+
     async def generate_title(self, first_message: str) -> str:
         return self.title
 

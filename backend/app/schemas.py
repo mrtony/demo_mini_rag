@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class ChatStreamRequest(BaseModel):
@@ -9,6 +9,18 @@ class ChatStreamRequest(BaseModel):
     conversation_id: str | int = Field(default=0)
     message_id: int = 0
     message: str = Field(min_length=1)
+    knowledge_answering_enabled: bool | None = None
+
+
+class SourceCitation(BaseModel):
+    knowledge_document_id: str
+    display_filename: str
+    revision_number: int
+    chunk_count: int
+    excerpt: str
+    score: float
+    page_number: int | None = None
+    slide_number: int | None = None
 
 
 class ModelCatalogSummary(BaseModel):
@@ -64,6 +76,20 @@ class WorkspaceReorderRequest(BaseModel):
     workspace_ids: list[str] = Field(min_length=1)
 
 
+class KnowledgeBaseSettingsUpdateRequest(BaseModel):
+    chunk_size: int = Field(ge=1)
+    chunk_overlap: int = Field(ge=0)
+    retrieval_top_k: int = Field(ge=1)
+    similarity_threshold: float = Field(ge=0, le=1)
+    knowledge_answering_default: bool = False
+
+    @model_validator(mode="after")
+    def validate_chunk_overlap(self) -> "KnowledgeBaseSettingsUpdateRequest":
+        if self.chunk_overlap >= self.chunk_size:
+            raise ValueError("Chunk Overlap must be smaller than Chunk Size")
+        return self
+
+
 class WorkspaceSummary(BaseModel):
     workspace_id: str
     name: str
@@ -73,6 +99,73 @@ class WorkspaceSummary(BaseModel):
     sort_order: int
     created_at: datetime
     updated_at: datetime
+
+
+class KnowledgeBaseSettingsSummary(BaseModel):
+    workspace_id: str
+    chunk_size: int
+    chunk_overlap: int
+    retrieval_top_k: int
+    similarity_threshold: float
+    knowledge_answering_default: bool
+    rebuild_required: bool
+
+
+class KnowledgeBaseJobItemSummary(BaseModel):
+    item_id: str
+    filename: str
+    status: str
+    outcome: str | None = None
+    error_message: str | None = None
+
+
+class KnowledgeBaseJobSummary(BaseModel):
+    job_id: str
+    workspace_id: str
+    job_type: str
+    status: str
+    file_count: int
+    created_at: datetime
+    items: list[KnowledgeBaseJobItemSummary] = Field(default_factory=list)
+    completed_at: datetime | None = None
+
+
+class KnowledgeBaseJobListResponse(BaseModel):
+    active: list[KnowledgeBaseJobSummary]
+    history: list[KnowledgeBaseJobSummary]
+    history_total: int
+    history_page: int
+
+
+class KnowledgeDocumentSummary(BaseModel):
+    knowledge_document_id: str
+    display_filename: str
+    revision_number: int
+    chunk_count: int
+    locator_summary: list[str] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+
+
+class KnowledgeDocumentListResponse(BaseModel):
+    documents: list[KnowledgeDocumentSummary]
+
+
+class KnowledgeBaseSearchRequest(BaseModel):
+    query: str = Field(min_length=1)
+
+
+class KnowledgeBaseSearchResult(BaseModel):
+    knowledge_document_id: str
+    display_filename: str
+    revision_number: int
+    chunk_count: int
+    excerpt: str
+    score: float
+
+
+class KnowledgeBaseSearchResponse(BaseModel):
+    results: list[KnowledgeBaseSearchResult]
 
 
 class ConversationSummary(BaseModel):
@@ -87,6 +180,11 @@ class StoredMessage(BaseModel):
     query: str
     response: str
     status: str
+    knowledge_answering_requested: bool = False
+    knowledge_answering_used: bool = False
+    fallback_reason: str | None = None
+    retrieval_query: str | None = None
+    sources: list[SourceCitation] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 

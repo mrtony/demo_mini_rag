@@ -8,8 +8,8 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
+from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -17,13 +17,37 @@ from sqlalchemy.orm import selectinload
 from .chat_events import ChatStreamState
 from .config import Settings, get_settings
 from .db import SessionLocal, get_db_session
-from .models import Conversation, Message, ModelCatalog, Workspace, WorkspaceModelSetting
+from .models import (
+    Conversation,
+    KnowledgeBaseJob,
+    KnowledgeBaseJobItem,
+    KnowledgeDocument,
+    KnowledgeDocumentRevision,
+    Message,
+    ModelCatalog,
+    RetrievalTrace,
+    RetrievalTraceSource,
+    Workspace,
+    WorkspaceKnowledgeBaseSetting,
+    WorkspaceModelSetting,
+)
 from .schemas import (
     ChatStreamRequest,
     ConversationDetail,
     ConversationSummary,
+    KnowledgeBaseJobListResponse,
+    KnowledgeBaseJobItemSummary,
+    KnowledgeBaseSearchRequest,
+    KnowledgeBaseSearchResponse,
+    KnowledgeBaseSearchResult,
+    KnowledgeBaseJobSummary,
+    KnowledgeDocumentListResponse,
+    KnowledgeDocumentSummary,
+    KnowledgeBaseSettingsSummary,
+    KnowledgeBaseSettingsUpdateRequest,
     ModelCatalogEntry,
     ModelCatalogSummary,
+    SourceCitation,
     StoredMessage,
     WorkspaceCreateRequest,
     WorkspaceReorderRequest,
@@ -31,6 +55,21 @@ from .schemas import (
     WorkspaceSummary,
 )
 from .services.chat_service import ChatService
+from .services.kb_document_service import (
+    compute_content_hash,
+    delete_document_revision_from_index,
+    persist_upload_bytes,
+    search_workspace_documents,
+)
+from .services.kb_job_service import (
+    advance_import_queue,
+    create_rebuild_job,
+    has_active_import_jobs,
+    has_active_rebuild_job,
+    has_running_job,
+    schedule_import_queue_processing,
+)
+from .services.turn_orchestration import plan_chat_turn
 from .sse import format_sse_event, iter_sse
 
 
@@ -127,6 +166,72 @@ def _serialize_workspace(workspace: Workspace) -> WorkspaceSummary:
     )
 
 
+def _serialize_knowledge_base_settings(
+    settings: WorkspaceKnowledgeBaseSetting,
+) -> KnowledgeBaseSettingsSummary:
+    return KnowledgeBaseSettingsSummary(
+        workspace_id=settings.workspace.workspace_id,
+        chunk_size=settings.chunk_size,
+        chunk_overlap=settings.chunk_overlap,
+        retrieval_top_k=settings.retrieval_top_k,
+        similarity_threshold=settings.similarity_threshold,
+        knowledge_answering_default=settings.knowledge_answering_default,
+        rebuild_required=settings.rebuild_required,
+    )
+
+
+def _serialize_kb_job(job: KnowledgeBaseJob) -> KnowledgeBaseJobSummary:
+    return KnowledgeBaseJobSummary(
+        job_id=job.job_id,
+        workspace_id=job.workspace.workspace_id,
+        job_type=job.job_type,
+        status=job.status,
+        file_count=job.file_count,
+        created_at=job.created_at,
+        items=[
+            KnowledgeBaseJobItemSummary(
+                item_id=item.item_id,
+                filename=item.filename,
+                status=item.status,
+                outcome=item.outcome,
+                error_message=item.error_message,
+            )
+            for item in job.items
+        ],
+        completed_at=job.completed_at,
+    )
+
+
+def _serialize_knowledge_document(document: KnowledgeDocument) -> KnowledgeDocumentSummary:
+    locator_summary: list[str] = []
+    if document.current_revision is not None:
+        try:
+            locator_data = json.loads(document.current_revision.page_or_slide_map_json)
+        except json.JSONDecodeError:
+            locator_data = []
+        if isinstance(locator_data, list):
+            for locator in locator_data:
+                if not isinstance(locator, dict):
+                    continue
+                page_number = locator.get("page")
+                slide_number = locator.get("slide")
+                if isinstance(page_number, int):
+                    locator_summary.append(f"Page {page_number}")
+                elif isinstance(slide_number, int):
+                    locator_summary.append(f"Slide {slide_number}")
+
+    current_revision = document.current_revision
+    return KnowledgeDocumentSummary(
+        knowledge_document_id=document.knowledge_document_id,
+        display_filename=document.display_filename,
+        revision_number=current_revision.revision_number if current_revision is not None else 0,
+        chunk_count=current_revision.chunk_count if current_revision is not None else 0,
+        locator_summary=locator_summary,
+        created_at=document.created_at,
+        updated_at=document.updated_at,
+    )
+
+
 def _serialize_conversation_summary(conversation: Conversation) -> ConversationSummary:
     return ConversationSummary(
         workspace_id=conversation.workspace.workspace_id,
@@ -155,6 +260,8 @@ async def _load_workspace_by_public_id_or_404(
         .options(
             selectinload(Workspace.selected_model),
             selectinload(Workspace.model_settings),
+            selectinload(Workspace.knowledge_base_setting),
+            selectinload(Workspace.active_knowledge_base_version),
         )
         .execution_options(populate_existing=True)
         .where(*conditions)
@@ -302,10 +409,39 @@ async def _replace_workspace_model_settings(
         )
 
 
+def _build_default_knowledge_base_settings(workspace_fk: int) -> WorkspaceKnowledgeBaseSetting:
+    return WorkspaceKnowledgeBaseSetting(
+        workspace_fk=workspace_fk,
+        chunk_size=800,
+        chunk_overlap=200,
+        retrieval_top_k=8,
+        similarity_threshold=0.2,
+        knowledge_answering_default=False,
+        rebuild_required=False,
+    )
+
+
+def _get_workspace_knowledge_base_setting_or_500(
+    workspace: Workspace,
+) -> WorkspaceKnowledgeBaseSetting:
+    if workspace.knowledge_base_setting is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Knowledge Base Settings are not configured for this Workspace",
+        )
+    return workspace.knowledge_base_setting
+
+
 async def _create_message(
     conversation_pk: int,
     user_query: str,
     openai_response_id: str | None,
+    *,
+    knowledge_answering_requested: bool = False,
+    knowledge_answering_used: bool = False,
+    fallback_reason: str | None = None,
+    retrieval_query: str | None = None,
+    sources: list[dict[str, Any]] | None = None,
 ) -> Message:
     async with SessionLocal() as session:
         message = Message(
@@ -314,6 +450,11 @@ async def _create_message(
             response="",
             openai_response_id=openai_response_id,
             status="streaming",
+            knowledge_answering_requested=knowledge_answering_requested,
+            knowledge_answering_used=knowledge_answering_used,
+            fallback_reason=fallback_reason,
+            retrieval_query=retrieval_query,
+            sources_json=json.dumps(sources or [], ensure_ascii=False),
         )
         session.add(message)
         conversation = await session.get(Conversation, conversation_pk)
@@ -322,6 +463,85 @@ async def _create_message(
         await session.commit()
         await session.refresh(message)
         return message
+
+
+def _coerce_optional_int(value: Any) -> int | None:
+    return value if isinstance(value, int) else None
+
+
+def _coerce_optional_str(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+async def _create_retrieval_trace(
+    *,
+    message_id: int,
+    workspace: Workspace,
+    knowledge_base_version_fk: int | None,
+    fallback_reason: str | None,
+    retrieval_query: str | None,
+    retrieval_top_k: int | None,
+    similarity_threshold: float | None,
+    sources: list[dict[str, Any]],
+) -> None:
+    if knowledge_base_version_fk is None or retrieval_query is None or not sources:
+        return
+
+    async with SessionLocal() as session:
+        trace = RetrievalTrace(
+            message_fk=message_id,
+            workspace_fk=workspace.id,
+            knowledge_base_version_fk=knowledge_base_version_fk,
+            fallback_reason=fallback_reason,
+            retrieval_query_text=retrieval_query,
+            retrieval_top_k=retrieval_top_k or 0,
+            similarity_threshold=similarity_threshold or 0.0,
+        )
+        session.add(trace)
+        await session.flush()
+
+        for source in sources:
+            document = (
+                await session.execute(
+                    select(KnowledgeDocument).where(
+                        KnowledgeDocument.workspace_fk == workspace.id,
+                        KnowledgeDocument.knowledge_document_id == str(
+                            source.get("knowledge_document_id", "")
+                        ),
+                    )
+                )
+            ).scalar_one_or_none()
+
+            revision = None
+            revision_number = _coerce_optional_int(source.get("revision_number"))
+            if document is not None and revision_number is not None:
+                revision = (
+                    await session.execute(
+                        select(KnowledgeDocumentRevision).where(
+                            KnowledgeDocumentRevision.knowledge_document_fk == document.id,
+                            KnowledgeDocumentRevision.revision_number == revision_number,
+                        )
+                    )
+                ).scalar_one_or_none()
+
+            session.add(
+                RetrievalTraceSource(
+                    retrieval_trace_fk=trace.id,
+                    knowledge_document_fk=document.id if document is not None else None,
+                    knowledge_document_revision_fk=revision.id if revision is not None else None,
+                    node_id=_coerce_optional_str(source.get("node_id")),
+                    score=float(source.get("score") or 0.0),
+                    page_number=_coerce_optional_int(source.get("page_number")),
+                    slide_number=_coerce_optional_int(source.get("slide_number")),
+                    citation_snapshot_text=str(source.get("excerpt") or ""),
+                    display_filename=str(source.get("display_filename") or ""),
+                )
+            )
+
+        await session.commit()
 
 
 async def _update_message_response(message_id: int, response_text: str, status_value: str | None = None) -> None:
@@ -337,6 +557,43 @@ async def _update_message_response(message_id: int, response_text: str, status_v
         if conversation is not None:
             conversation.updated_at = _utc_now()
         await session.commit()
+
+
+def _deserialize_sources(raw_value: str) -> list[SourceCitation]:
+    try:
+        payload = json.loads(raw_value)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(payload, list):
+        return []
+    return [
+        SourceCitation.model_validate(item)
+        for item in payload
+        if isinstance(item, dict)
+    ]
+
+
+def _build_done_event_payload(
+    *,
+    message_id: int | None,
+    status_value: str,
+    knowledge_answering_requested: bool,
+    knowledge_answering_used: bool,
+    fallback_reason: str | None,
+    sources: list[dict[str, Any]] | None,
+    emit_metadata: bool,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "message_id": message_id,
+        "status": status_value,
+    }
+    if emit_metadata:
+        payload["knowledge_answering_requested"] = knowledge_answering_requested
+        payload["knowledge_answering_used"] = knowledge_answering_used
+        payload["fallback_reason"] = fallback_reason
+        if sources:
+            payload["sources"] = sources
+    return payload
 
 
 async def _update_conversation_title(conversation_pk: int, title: str) -> Conversation | None:
@@ -371,6 +628,7 @@ async def list_workspaces(session: AsyncSession = Depends(get_db_session)) -> li
         .options(
             selectinload(Workspace.selected_model),
             selectinload(Workspace.model_settings),
+            selectinload(Workspace.knowledge_base_setting),
         )
         .where(Workspace.is_archived.is_(False))
         .order_by(Workspace.sort_order.asc(), Workspace.id.asc())
@@ -387,6 +645,7 @@ async def list_archived_workspaces(
         .options(
             selectinload(Workspace.selected_model),
             selectinload(Workspace.model_settings),
+            selectinload(Workspace.knowledge_base_setting),
         )
         .where(Workspace.is_archived.is_(True))
         .order_by(Workspace.sort_order.asc(), Workspace.id.asc())
@@ -429,6 +688,7 @@ async def create_workspace(
     session.add(workspace)
     await session.flush()
     await _replace_workspace_model_settings(session, workspace, _model_settings_defaults(default_model))
+    session.add(_build_default_knowledge_base_settings(workspace.id))
     await session.commit()
 
     created_workspace = await _load_workspace_or_404(session, workspace.workspace_id)
@@ -453,6 +713,51 @@ async def update_workspace(
 
     updated_workspace = await _load_workspace_or_404(session, workspace_id)
     return _serialize_workspace(updated_workspace)
+
+
+@router.get(
+    "/workspaces/{workspace_id}/knowledge-base-settings",
+    response_model=KnowledgeBaseSettingsSummary,
+)
+async def get_workspace_knowledge_base_settings(
+    workspace_id: str,
+    session: AsyncSession = Depends(get_db_session),
+) -> KnowledgeBaseSettingsSummary:
+    workspace = await _load_workspace_or_404(session, workspace_id)
+    knowledge_base_setting = _get_workspace_knowledge_base_setting_or_500(workspace)
+    return _serialize_knowledge_base_settings(knowledge_base_setting)
+
+
+@router.put(
+    "/workspaces/{workspace_id}/knowledge-base-settings",
+    response_model=KnowledgeBaseSettingsSummary,
+)
+async def update_workspace_knowledge_base_settings(
+    workspace_id: str,
+    payload: KnowledgeBaseSettingsUpdateRequest,
+    session: AsyncSession = Depends(get_db_session),
+) -> KnowledgeBaseSettingsSummary:
+    workspace = await _load_workspace_or_404(session, workspace_id)
+    knowledge_base_setting = _get_workspace_knowledge_base_setting_or_500(workspace)
+
+    ingestion_settings_changed = (
+        knowledge_base_setting.chunk_size != payload.chunk_size
+        or knowledge_base_setting.chunk_overlap != payload.chunk_overlap
+    )
+
+    knowledge_base_setting.chunk_size = payload.chunk_size
+    knowledge_base_setting.chunk_overlap = payload.chunk_overlap
+    knowledge_base_setting.retrieval_top_k = payload.retrieval_top_k
+    knowledge_base_setting.similarity_threshold = payload.similarity_threshold
+    knowledge_base_setting.knowledge_answering_default = payload.knowledge_answering_default
+    if ingestion_settings_changed:
+        knowledge_base_setting.rebuild_required = True
+    knowledge_base_setting.updated_at = _utc_now()
+    await session.commit()
+
+    updated_workspace = await _load_workspace_or_404(session, workspace_id)
+    updated_setting = _get_workspace_knowledge_base_setting_or_500(updated_workspace)
+    return _serialize_knowledge_base_settings(updated_setting)
 
 
 @router.post("/workspaces/reorder", response_model=list[WorkspaceSummary])
@@ -562,6 +867,11 @@ async def get_conversation(
                 query=message.query,
                 response=message.response,
                 status=message.status,
+                knowledge_answering_requested=message.knowledge_answering_requested,
+                knowledge_answering_used=message.knowledge_answering_used,
+                fallback_reason=message.fallback_reason,
+                retrieval_query=message.retrieval_query,
+                sources=_deserialize_sources(message.sources_json),
                 created_at=message.created_at,
                 updated_at=message.updated_at,
             )
@@ -681,6 +991,12 @@ async def stream_chat(
             title_task = asyncio.create_task(chat_service.generate_title(payload.message))
 
         messages = await _load_conversation_messages(conversation_pk)
+        turn_plan = await plan_chat_turn(
+            workspace=workspace,
+            messages=messages,
+            user_message=payload.message,
+            knowledge_answering_enabled=payload.knowledge_answering_enabled,
+        )
 
         async def emit_title_if_ready(force: bool = False):
             nonlocal title_sent
@@ -704,7 +1020,14 @@ async def stream_chat(
             )
 
         try:
-            stream = chat_service.stream_chat(messages, payload.message)
+            if turn_plan.prompt_messages is None:
+                stream = chat_service.stream_chat(messages, payload.message)
+            else:
+                stream = chat_service.stream_prompt_messages(
+                    turn_plan.prompt_messages,
+                    prompt_length=len(payload.message),
+                    history_size=len(messages),
+                )
 
             async for event in stream:
                 if stop_event.is_set():
@@ -739,8 +1062,23 @@ async def stream_chat(
                         conversation_pk=conversation_pk,
                         user_query=payload.message,
                         openai_response_id=event.response_id,
+                        knowledge_answering_requested=turn_plan.knowledge_answering_requested,
+                        knowledge_answering_used=turn_plan.knowledge_answering_used,
+                        fallback_reason=turn_plan.fallback_reason,
+                        retrieval_query=turn_plan.retrieval_query,
+                        sources=turn_plan.sources,
                     )
                     message_id = message.id
+                    await _create_retrieval_trace(
+                        message_id=message.id,
+                        workspace=workspace,
+                        knowledge_base_version_fk=turn_plan.knowledge_base_version_fk,
+                        fallback_reason=turn_plan.fallback_reason,
+                        retrieval_query=turn_plan.retrieval_query,
+                        retrieval_top_k=turn_plan.retrieval_top_k,
+                        similarity_threshold=turn_plan.similarity_threshold,
+                        sources=turn_plan.sources,
+                    )
                     logger.info(
                         "Chat stream started for conversation %s with message %s",
                         public_conversation_id,
@@ -755,8 +1093,23 @@ async def stream_chat(
                             conversation_pk=conversation_pk,
                             user_query=payload.message,
                             openai_response_id=event.response_id,
+                            knowledge_answering_requested=turn_plan.knowledge_answering_requested,
+                            knowledge_answering_used=turn_plan.knowledge_answering_used,
+                            fallback_reason=turn_plan.fallback_reason,
+                            retrieval_query=turn_plan.retrieval_query,
+                            sources=turn_plan.sources,
                         )
                         message_id = message.id
+                        await _create_retrieval_trace(
+                            message_id=message.id,
+                            workspace=workspace,
+                            knowledge_base_version_fk=turn_plan.knowledge_base_version_fk,
+                            fallback_reason=turn_plan.fallback_reason,
+                            retrieval_query=turn_plan.retrieval_query,
+                            retrieval_top_k=turn_plan.retrieval_top_k,
+                            similarity_threshold=turn_plan.similarity_threshold,
+                            sources=turn_plan.sources,
+                        )
                         yield format_sse_event("message.created", {"message_id": message.id})
                     delta = event.delta
                     response_buffer += delta
@@ -769,7 +1122,13 @@ async def stream_chat(
                     )
                     continue
 
+                if event.state == ChatStreamState.SOURCES:
+                    yield format_sse_event("sources", {"sources": event.sources})
+                    continue
+
                 if event.state == ChatStreamState.COMPLETED:
+                    if turn_plan.knowledge_answering_used and turn_plan.sources:
+                        yield format_sse_event("sources", {"sources": turn_plan.sources})
                     if message_id is not None:
                         await _update_message_response(message_id, response_buffer, "completed")
                         terminal_status = "completed"
@@ -784,10 +1143,15 @@ async def stream_chat(
                         yield title_event
                     yield format_sse_event(
                         "message.done",
-                        {
-                            "message_id": message_id,
-                            "status": "completed",
-                        },
+                        _build_done_event_payload(
+                            message_id=message_id,
+                            status_value="completed",
+                            knowledge_answering_requested=turn_plan.knowledge_answering_requested,
+                            knowledge_answering_used=turn_plan.knowledge_answering_used,
+                            fallback_reason=turn_plan.fallback_reason,
+                            sources=turn_plan.sources,
+                            emit_metadata=turn_plan.emit_metadata,
+                        ),
                     )
                     return
 
@@ -824,10 +1188,15 @@ async def stream_chat(
                 yield title_event
             yield format_sse_event(
                 "message.done",
-                {
-                    "message_id": message_id,
-                    "status": "completed",
-                },
+                _build_done_event_payload(
+                    message_id=message_id,
+                    status_value="completed",
+                    knowledge_answering_requested=turn_plan.knowledge_answering_requested,
+                    knowledge_answering_used=turn_plan.knowledge_answering_used,
+                    fallback_reason=turn_plan.fallback_reason,
+                    sources=turn_plan.sources,
+                    emit_metadata=turn_plan.emit_metadata,
+                ),
             )
         except asyncio.CancelledError:
             terminal_status = terminal_status or "stopped"
@@ -865,3 +1234,292 @@ async def stream_chat(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+# ─── Knowledge Base Jobs ────────────────────────────────────────────────────
+
+_ACTIVE_JOB_STATUSES = ("queued", "running")
+_HISTORY_JOB_STATUSES = ("completed", "failed", "canceled")
+
+
+@router.post(
+    "/workspaces/{workspace_id}/knowledge-base/import",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=KnowledgeBaseJobSummary,
+)
+async def create_knowledge_base_import_job(
+    workspace_id: str,
+    files: list[UploadFile] = File(...),
+    session: AsyncSession = Depends(get_db_session),
+) -> KnowledgeBaseJobSummary:
+    workspace = await _load_workspace_or_404(session, workspace_id)
+
+    job = KnowledgeBaseJob(
+        job_id=str(uuid4()),
+        workspace_fk=workspace.id,
+        status="queued",
+        file_count=len(files),
+    )
+    session.add(job)
+    await session.flush()
+
+    for upload in files:
+        item_id = str(uuid4())
+        content = await upload.read()
+        item = KnowledgeBaseJobItem(
+            item_id=item_id,
+            job_fk=job.id,
+            filename=upload.filename or "unknown",
+            mime_type=upload.content_type or "application/octet-stream",
+            content_hash=compute_content_hash(content),
+            native_file_path=persist_upload_bytes(
+                workspace.workspace_id,
+                job.job_id,
+                item_id,
+                upload.filename or "unknown",
+                content,
+            ),
+            status="pending",
+        )
+        session.add(item)
+
+    await session.commit()
+    await session.refresh(job)
+    schedule_import_queue_processing(workspace.workspace_id)
+    return _serialize_kb_job(job)
+
+
+@router.post(
+    "/workspaces/{workspace_id}/knowledge-base/rebuild",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=KnowledgeBaseJobSummary,
+)
+async def create_knowledge_base_rebuild_job(
+    workspace_id: str,
+    session: AsyncSession = Depends(get_db_session),
+) -> KnowledgeBaseJobSummary:
+    workspace = await _load_workspace_or_404(session, workspace_id)
+
+    if await has_active_import_jobs(workspace.id, session):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Knowledge Base Rebuild cannot start while there are queued or running import jobs",
+        )
+    if await has_active_rebuild_job(workspace.id, session):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Knowledge Base Rebuild is already queued or running",
+        )
+
+    job = await create_rebuild_job(workspace, session)
+    await session.commit()
+    await session.refresh(job)
+    schedule_import_queue_processing(workspace.workspace_id)
+    return _serialize_kb_job(job)
+
+
+@router.get(
+    "/workspaces/{workspace_id}/knowledge-base/jobs",
+    response_model=KnowledgeBaseJobListResponse,
+)
+async def list_knowledge_base_jobs(
+    workspace_id: str,
+    history_page: int = 1,
+    history_page_size: int = 20,
+    session: AsyncSession = Depends(get_db_session),
+) -> KnowledgeBaseJobListResponse:
+    workspace = await _load_workspace_or_404(session, workspace_id)
+
+    active_result = await session.execute(
+        select(KnowledgeBaseJob)
+        .where(
+            KnowledgeBaseJob.workspace_fk == workspace.id,
+            KnowledgeBaseJob.status.in_(_ACTIVE_JOB_STATUSES),
+        )
+        .order_by(KnowledgeBaseJob.id.asc())
+    )
+    active_jobs = active_result.scalars().all()
+
+    history_offset = (history_page - 1) * history_page_size
+    history_result = await session.execute(
+        select(KnowledgeBaseJob)
+        .where(
+            KnowledgeBaseJob.workspace_fk == workspace.id,
+            KnowledgeBaseJob.status.in_(_HISTORY_JOB_STATUSES),
+        )
+        .order_by(KnowledgeBaseJob.id.desc())
+        .offset(history_offset)
+        .limit(history_page_size)
+    )
+    history_jobs = history_result.scalars().all()
+
+    count_result = await session.execute(
+        select(func.count()).select_from(KnowledgeBaseJob).where(
+            KnowledgeBaseJob.workspace_fk == workspace.id,
+            KnowledgeBaseJob.status.in_(_HISTORY_JOB_STATUSES),
+        )
+    )
+    history_total: int = count_result.scalar_one()
+
+    return KnowledgeBaseJobListResponse(
+        active=[_serialize_kb_job(j) for j in active_jobs],
+        history=[_serialize_kb_job(j) for j in history_jobs],
+        history_total=history_total,
+        history_page=history_page,
+    )
+
+
+@router.get(
+    "/workspaces/{workspace_id}/knowledge-base/documents",
+    response_model=KnowledgeDocumentListResponse,
+)
+async def list_knowledge_base_documents(
+    workspace_id: str,
+    session: AsyncSession = Depends(get_db_session),
+) -> KnowledgeDocumentListResponse:
+    workspace = await _load_workspace_or_404(session, workspace_id)
+
+    result = await session.execute(
+        select(KnowledgeDocument)
+        .where(
+            KnowledgeDocument.workspace_fk == workspace.id,
+            KnowledgeDocument.is_deleted.is_(False),
+            KnowledgeDocument.current_revision_fk.is_not(None),
+        )
+        .options(selectinload(KnowledgeDocument.current_revision))
+        .order_by(KnowledgeDocument.id.asc())
+    )
+    documents = result.scalars().all()
+    return KnowledgeDocumentListResponse(
+        documents=[_serialize_knowledge_document(document) for document in documents]
+    )
+
+
+@router.post(
+    "/workspaces/{workspace_id}/knowledge-base/search",
+    response_model=KnowledgeBaseSearchResponse,
+)
+async def search_knowledge_base_documents(
+    workspace_id: str,
+    payload: KnowledgeBaseSearchRequest,
+    session: AsyncSession = Depends(get_db_session),
+) -> KnowledgeBaseSearchResponse:
+    await _load_workspace_or_404(session, workspace_id)
+    results = await search_workspace_documents(workspace_id, payload.query, session)
+    return KnowledgeBaseSearchResponse(
+        results=[
+            KnowledgeBaseSearchResult(
+                knowledge_document_id=result.knowledge_document_id,
+                display_filename=result.display_filename,
+                revision_number=result.revision_number,
+                chunk_count=result.chunk_count,
+                excerpt=result.excerpt,
+                score=result.score,
+            )
+            for result in results
+        ]
+    )
+
+
+@router.delete(
+    "/workspaces/{workspace_id}/knowledge-base/documents/{knowledge_document_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_knowledge_base_document(
+    workspace_id: str,
+    knowledge_document_id: str,
+    session: AsyncSession = Depends(get_db_session),
+) -> Response:
+    workspace = await _load_workspace_or_404(session, workspace_id)
+
+    result = await session.execute(
+        select(KnowledgeDocument)
+        .where(
+            KnowledgeDocument.workspace_fk == workspace.id,
+            KnowledgeDocument.knowledge_document_id == knowledge_document_id,
+            KnowledgeDocument.is_deleted.is_(False),
+        )
+        .options(selectinload(KnowledgeDocument.current_revision))
+    )
+    document = result.scalar_one_or_none()
+    if document is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Knowledge document not found")
+
+    if document.current_revision is not None and workspace.active_knowledge_base_version is not None:
+        delete_document_revision_from_index(
+            collection_name=workspace.active_knowledge_base_version.collection_name,
+            knowledge_document_id=document.knowledge_document_id,
+            revision_number=document.current_revision.revision_number,
+        )
+    document.is_deleted = True
+    document.deleted_at = _utc_now()
+    document.updated_at = _utc_now()
+    await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post(
+    "/workspaces/{workspace_id}/knowledge-base/jobs/{job_id}/cancel",
+    response_model=KnowledgeBaseJobSummary,
+)
+async def cancel_knowledge_base_job(
+    workspace_id: str,
+    job_id: str,
+    session: AsyncSession = Depends(get_db_session),
+) -> KnowledgeBaseJobSummary:
+    workspace = await _load_workspace_or_404(session, workspace_id)
+
+    result = await session.execute(
+        select(KnowledgeBaseJob).where(
+            KnowledgeBaseJob.job_id == job_id,
+            KnowledgeBaseJob.workspace_fk == workspace.id,
+        )
+    )
+    job = result.scalar_one_or_none()
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+
+    if job.status != "queued":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Only queued jobs can be canceled",
+        )
+
+    job.status = "canceled"
+    await session.commit()
+    await session.refresh(job)
+    return _serialize_kb_job(job)
+
+
+@router.post(
+    "/workspaces/{workspace_id}/knowledge-base/jobs/{job_id}/advance-to-running",
+    response_model=KnowledgeBaseJobSummary,
+)
+async def _advance_job_to_running(
+    workspace_id: str,
+    job_id: str,
+    session: AsyncSession = Depends(get_db_session),
+) -> KnowledgeBaseJobSummary:
+    """Test-only helper: advance a queued job to running status."""
+    workspace = await _load_workspace_or_404(session, workspace_id)
+
+    result = await session.execute(
+        select(KnowledgeBaseJob).where(
+            KnowledgeBaseJob.job_id == job_id,
+            KnowledgeBaseJob.workspace_fk == workspace.id,
+        )
+    )
+    job = result.scalar_one_or_none()
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+
+    if job.status != "queued":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Only queued jobs can be advanced to running",
+        )
+
+    job.status = "running"
+    await session.commit()
+    await session.refresh(job)
+    return _serialize_kb_job(job)
