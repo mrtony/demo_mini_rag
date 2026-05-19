@@ -1,3 +1,7 @@
+## General
+
+- 在寫 PRD、ADR、Issue時, 要使用繁體中文來建立文件內容。
+
 ## Tech stack
 
 ### backend
@@ -14,7 +18,7 @@ USe Tailwind CSS for styling the frontend components.
 
 ### Issue tracker
 
-Issues are tracked in GitHub Issues for this repository. See `docs/agents/issue-tracker.md`.
+Local markdown files under `.scratch/`. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 
