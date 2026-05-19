@@ -4,7 +4,7 @@
 
 ## 解決方案
 
-為每個 **Workspace** 新增一個工作區級 **Knowledge Base**，讓使用者可以在 `Workspace Settings` 內的 `Knowledge Base` tab 編輯 **Knowledge Base Settings**，並在獨立的 **Knowledge Base Management** 畫面中管理文件、拖放上傳、檢視匯入結果與 job 歷史。文件匯入流程將以 `Native File -> Normalized Markdown -> chunking -> embedding -> Qdrant` 運作，並以非同步 **Knowledge Base Job** 執行；聊天側則新增可預設開啟、但可對單一 **Turn** 暫時覆寫的 **Knowledge Answering**，在成功命中時以知識庫內容作為主要證據，並在回答下方顯示 `Sources Section` 與 `Source Citations`。若知識庫不可用或檢索結果不足，該 **Turn** 可退回一般聊天。系統同時支援版本化 rebuild、per-document revision、內容 hash 去重、Qdrant 每工作區獨立 collection，以及可供未來 Agent / Tool 共用的知識檢索 capability。
+為每個 **Workspace** 新增一個工作區級 **Knowledge Base**，讓使用者可以在 `Workspace Settings` 內的 `Knowledge Base` tab 編輯 **Knowledge Base Settings**，並在獨立的 **Knowledge Base Management** 畫面中管理文件、拖放上傳、檢視匯入結果與 job 歷史。文件匯入流程將以 `Native File -> Normalized Markdown -> chunking -> embedding -> Qdrant` 運作，並由 **Microsoft MarkItDown**、**LlamaIndex**、**fastembed** 與 **Qdrant** 組成 v1 的主要實作路徑，再以非同步 **Knowledge Base Job** 執行；聊天側則新增可預設開啟、但可對單一 **Turn** 暫時覆寫的 **Knowledge Answering**，在成功命中時以知識庫內容作為主要證據，並在回答下方顯示 `Sources Section` 與 `Source Citations`。若知識庫不可用或檢索結果不足，該 **Turn** 可退回一般聊天。系統同時支援版本化 rebuild、per-document revision、內容 hash 去重、Qdrant 每工作區獨立 collection，以及可供未來 Agent / Tool 共用的知識檢索 capability。
 
 ## 使用者故事
 
@@ -66,6 +66,8 @@
 - 明確區分 ingestion settings 與 retrieval settings：前者會觸發 `Rebuild Required`，後者在回答時即時生效，不需 rebuild。
 - 保留目前文件 revisions 對應的 native uploaded files，讓後續 rebuild 不必要求使用者重新上傳。
 - 透過 Microsoft MarkItDown 先將支援格式正規化後再進行 chunking，讓 PDF、DOCX、PPTX、TXT 與 Markdown 走一致的匯入路徑。
+- v1 明確採用 LlamaIndex 作為文件 ingestion 與 retrieval pipeline 的主要整合框架，但其能力仍需包在 application-level ports 後面，避免上層直接依賴框架物件。
+- v1 明確採用 fastembed 作為 embedding generation 的主要實作，並由 LlamaIndex pipeline 進行整合。
 - 在可保留結構的情況下採用 markdown-aware chunking，並保留 page 與 slide locator metadata 供 citations 使用。
 - 向量與 chunk text 只存於 Qdrant，不複製到 application database；application database 只保存 document、revision、job、version、retrieval trace 與 citation snapshot metadata。
 - 採用每個 workspace 一個 Qdrant collection 的策略，所有 retrieval 都透過該 workspace 的 active knowledge-base version 或 alias 路由。
@@ -306,6 +308,7 @@ final event 應包含：
 ### Slice 2：Import pipeline 與管理 UI
 
 - 整合 MarkItDown normalization
+- 以 LlamaIndex ingestion pipeline 串接 chunking、fastembed 與 Qdrant upsert
 - 加入 chunking、embedding 與 Qdrant upsert
 - 加入 batch import jobs 與 per-item outcomes
 - 加入基礎的 knowledge-base management UI
@@ -353,4 +356,5 @@ final event 應包含：
 - 這份 PRD 是建立在既有 workspace-first chat redesign 之上，而不是取代它。
 - 實作時應持續對齊 `CONTEXT.md` 中的 glossary vocabulary。
 - 實作時應遵守 ADR-0003、ADR-0004 與 ADR-0005，作為 knowledge-base topology、非同步 job 流程與 knowledge-answering orchestration 的架構約束。
+- 雖然上層能力邊界應保持 framework-agnostic，但 v1 的具體技術選型仍明確是 `MarkItDown + LlamaIndex + fastembed + Qdrant`。
 - 最值得保護的深模組是 application-level ingestion service、retrieval service、citation service 與 job coordinator，因為這些邊界能保護程式碼免於未來 parser、vector store、worker 與 agent framework 變動的衝擊。
