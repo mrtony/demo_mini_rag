@@ -1,6 +1,7 @@
 import asyncio
 from collections.abc import AsyncIterator
 from pathlib import Path
+import re
 import sys
 
 import pytest_asyncio
@@ -13,6 +14,86 @@ from backend.app.chat_events import ChatEvent, ChatStreamState
 from backend.app.db import Base
 from backend.app.main import app
 from backend.app.routes import get_chat_service
+from backend.app.services.kb_document_service import NormalizedMarkdownArtifact, SearchResult
+
+
+class FakeKnowledgeBaseBackend:
+    def __init__(self) -> None:
+        self.collections: dict[str, dict[tuple[str, int], SearchResult]] = {}
+
+    def normalize_file(self, native_file_path: str, filename: str) -> NormalizedMarkdownArtifact:
+        extension = Path(filename).suffix.lower()
+        if extension not in {".txt", ".md", ".markdown", ".pdf"}:
+            raise ValueError(f"Unsupported file type: {extension or 'unknown'}")
+
+        raw_bytes = Path(native_file_path).read_bytes()
+        if extension in {".txt", ".md", ".markdown"}:
+            try:
+                normalized_markdown = raw_bytes.decode("utf-8").strip()
+            except UnicodeDecodeError as exc:
+                raise ValueError("Unable to decode uploaded file as UTF-8 text") from exc
+        else:
+            decoded_pdf = raw_bytes.decode("latin-1", errors="ignore")
+            normalized_markdown = "Hello PDF" if "Hello PDF" in decoded_pdf else decoded_pdf.strip()
+
+        if not normalized_markdown:
+            raise ValueError("Uploaded file did not contain any text")
+
+        locator_map = [] if extension == ".pdf" else [{"page": 1}]
+        return NormalizedMarkdownArtifact(
+            normalized_markdown_text=normalized_markdown,
+            page_or_slide_map=locator_map,
+        )
+
+    def ingest_revision(
+        self,
+        *,
+        collection_name: str,
+        knowledge_document_id: str,
+        revision_number: int,
+        display_filename: str,
+        normalized_markdown_text: str,
+        page_or_slide_map: list[dict[str, int]],
+        chunk_size: int,
+        chunk_overlap: int,
+    ) -> int:
+        words = re.findall(r"\S+", normalized_markdown_text)
+        chunk_count = max(1, (len(words) + max(chunk_size, 1) - 1) // max(chunk_size, 1))
+        locator = page_or_slide_map[0] if page_or_slide_map else {}
+        self.collections.setdefault(collection_name, {})[(knowledge_document_id, revision_number)] = SearchResult(
+            knowledge_document_id=knowledge_document_id,
+            display_filename=display_filename,
+            revision_number=revision_number,
+            chunk_count=chunk_count,
+            excerpt=normalized_markdown_text[:240],
+            score=1.0,
+            page_number=locator.get("page"),
+            slide_number=locator.get("slide"),
+            node_id=f"{knowledge_document_id}:revision:{revision_number}",
+        )
+        return chunk_count
+
+    def delete_revision(
+        self,
+        *,
+        collection_name: str,
+        knowledge_document_id: str,
+        revision_number: int,
+    ) -> None:
+        self.collections.get(collection_name, {}).pop((knowledge_document_id, revision_number), None)
+
+    def search(
+        self,
+        *,
+        collection_name: str,
+        query: str,
+        top_k: int,
+        similarity_threshold: float,
+    ) -> list[SearchResult]:
+        if not query.strip():
+            return []
+        results = list(self.collections.get(collection_name, {}).values())
+        return results[: max(top_k, 1)]
 
 
 class FakeChatService:
@@ -54,9 +135,10 @@ class FakeChatService:
 
 
 @pytest_asyncio.fixture()
-async def test_client(tmp_path) -> AsyncIterator[AsyncClient]:
+async def test_client(tmp_path, monkeypatch) -> AsyncIterator[AsyncClient]:
     from backend.app import db as db_module
     from backend.app import routes as routes_module
+    from backend.app.services import kb_document_service
     from backend.app.services.catalog_service import seed_model_catalog
 
     database_path = tmp_path / "test.db"
@@ -72,6 +154,13 @@ async def test_client(tmp_path) -> AsyncIterator[AsyncClient]:
     await seed_model_catalog()
 
     app.dependency_overrides[get_chat_service] = FakeChatService
+    fake_knowledge_base_backend = FakeKnowledgeBaseBackend()
+    kb_document_service.get_knowledge_base_backend.cache_clear()
+    monkeypatch.setattr(
+        kb_document_service,
+        "get_knowledge_base_backend",
+        lambda: fake_knowledge_base_backend,
+    )
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:

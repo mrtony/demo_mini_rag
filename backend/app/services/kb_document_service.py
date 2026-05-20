@@ -75,7 +75,14 @@ class KnowledgeBaseIngestionBackend(Protocol):
 
 
 class LlamaIndexQdrantKnowledgeBaseBackend:
-    def __init__(self, *, storage_path: str, embedding_model_name: str) -> None:
+    def __init__(
+        self,
+        *,
+        qdrant_url: str,
+        qdrant_api_key: str | None,
+        qdrant_prefer_grpc: bool,
+        embedding_model_name: str,
+    ) -> None:
         from markitdown import MarkItDown
         from llama_index.core import Document, VectorStoreIndex
         from llama_index.core.ingestion import IngestionPipeline
@@ -90,11 +97,13 @@ class LlamaIndexQdrantKnowledgeBaseBackend:
         self._VectorStoreIndex = VectorStoreIndex
         self._QdrantVectorStore = QdrantVectorStore
 
-        self._storage_path = Path(storage_path)
-        self._storage_path.mkdir(parents=True, exist_ok=True)
         self._markitdown = MarkItDown()
         self._embed_model = FastEmbedEmbedding(model_name=embedding_model_name)
-        self._qdrant_client = QdrantClient(path=str(self._storage_path))
+        self._qdrant_client = QdrantClient(
+            url=qdrant_url,
+            api_key=qdrant_api_key,
+            prefer_grpc=qdrant_prefer_grpc,
+        )
 
     def normalize_file(self, native_file_path: str, filename: str) -> NormalizedMarkdownArtifact:
         extension = Path(filename).suffix.lower()
@@ -309,8 +318,11 @@ def build_revision_ref_doc_id(knowledge_document_id: str, revision_number: int) 
 @lru_cache
 def get_knowledge_base_backend() -> KnowledgeBaseIngestionBackend:
     settings = get_settings()
+    qdrant_api_key = settings.kb_qdrant_api_key.get_secret_value().strip() or None
     return LlamaIndexQdrantKnowledgeBaseBackend(
-        storage_path=settings.kb_qdrant_path,
+        qdrant_url=settings.kb_qdrant_url,
+        qdrant_api_key=qdrant_api_key,
+        qdrant_prefer_grpc=settings.kb_qdrant_prefer_grpc,
         embedding_model_name=settings.kb_embedding_model,
     )
 

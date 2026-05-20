@@ -33,7 +33,9 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_file: str = str(DEFAULT_LOG_PATH)
     log_db_crud: bool = True
-    kb_qdrant_path: str = str(DATA_DIR / "knowledge_base_qdrant")
+    kb_qdrant_url: str = "http://localhost:6333"
+    kb_qdrant_api_key: SecretStr = SecretStr("")
+    kb_qdrant_prefer_grpc: bool = False
     kb_embedding_model: str = "BAAI/bge-small-en-v1.5"
 
     @field_validator("database_url")
@@ -50,13 +52,6 @@ class Settings(BaseSettings):
         log_path = Path(value)
         log_path.parent.mkdir(parents=True, exist_ok=True)
         return str(log_path)
-
-    @field_validator("kb_qdrant_path")
-    @classmethod
-    def ensure_kb_qdrant_dir(cls, value: str) -> str:
-        kb_path = Path(value)
-        kb_path.mkdir(parents=True, exist_ok=True)
-        return str(kb_path)
 
 
 @lru_cache
