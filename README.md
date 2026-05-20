@@ -187,6 +187,9 @@ Available backend settings:
 - `LOG_LEVEL`: backend log level such as `INFO` or `DEBUG`
 - `LOG_FILE`: backend log file path
 - `LOG_DB_CRUD`: whether to log database `SELECT`, `INSERT`, `UPDATE`, and `DELETE`
+- `KB_QDRANT_URL`: Qdrant Server URL for Knowledge Base indexing
+- `KB_QDRANT_API_KEY`: optional Qdrant API key for protected servers or Qdrant Cloud
+- `KB_QDRANT_PREFER_GRPC`: whether the Qdrant client should prefer gRPC when available
 
 ## Backend
 
@@ -215,6 +218,12 @@ uv run uvicorn main:app --reload
 ```
 
 The backend depends on `fastapi[standard]` so the `fastapi` CLI is available after `uv sync`.
+
+Run Qdrant Server for local Knowledge Base indexing:
+
+```powershell
+docker run -p 6333:6333 qdrant/qdrant:latest
+```
 
 ## Frontend
 
